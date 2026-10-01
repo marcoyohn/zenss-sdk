@@ -1,0 +1,9 @@
+{
+  "client_policy": "Network clients use protocol compatibility; host compiler matching is not required.",
+  "lock_sha256": "dacb39f46c4f410ab05ea668340069e9b59491a69b05b20a8bb907d4a903ce7e",
+  "native_plugin_policy": "Match the host compiler, target, features and shared dependency graph. Rebuild with host upgrades; no stable Rust ABI.",
+  "protocol": 1,
+  "rust_toolchain": "1.94.1",
+  "sdk_version": "0.1.1",
+  "zenoh": "1.10.1"
+}

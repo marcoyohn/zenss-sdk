@@ -1,0 +1,13 @@
+[package]
+name = "zenss-example-outbound-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+zenss-client-sdk.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true

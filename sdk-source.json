@@ -1,0 +1,34 @@
+{
+  "crates": [
+    "contracts/zenss-contracts",
+    "crates/zenss-plugin-trait",
+    "sdk/rust/zenss-client-sdk",
+    "examples/product-echo",
+    "examples/outbound-client"
+  ],
+  "files": {
+    ".github/workflows/ci.yml": "b2fbf3abc2f25763dd59779390d89b880b05ba9abb0d355adc86c9621f1ff2f5",
+    ".gitignore": "95af8a5680ca44ce2f331799f908cb2d2f3dc86efcb57846def37e721f48dde7",
+    "Cargo.lock": "dacb39f46c4f410ab05ea668340069e9b59491a69b05b20a8bb907d4a903ce7e",
+    "Cargo.toml": "6fddabbd12a2618ff3702e06ede1d8469383a939f4b4fa216dd44246f9067bbc",
+    "LICENSE": "912b38e7fd84734519f73972727eb2c922ad3289d6de5d39c028ec499d42939d",
+    "README.md": "7382141cb88da1a41521e0d338044573e4906ad73615c622503b37338e986990",
+    "compatibility.json": "a666ab9dffae59e78f0aac858ede4adeaeb4816fdedd89a08359930ddeb67035",
+    "contracts/zenss-contracts/Cargo.toml": "02154155ed31ddfd8d47ed2832a8cd4fba6eb46f5c494d6d168c6de50376b31b",
+    "contracts/zenss-contracts/src/lib.rs": "ad2c426435f9556414823170e3871df03c71037b72fbd29a30801d46366e776d",
+    "crates/zenss-plugin-trait/Cargo.toml": "067958ae0cc1107ae483aba193423343cbf1beb5ad091e2a6f257f231c8db6c3",
+    "crates/zenss-plugin-trait/src/lib.rs": "d844edc74ae4db2e22e0709f53bc1f7ed695f74700304ed51ae439efb73d0b24",
+    "crates/zenss-plugin-trait/src/managed.rs": "bed368663cbfe11fd2cba7d67260838b03f8493f4b46da13a9f67b5fb2959235",
+    "docs/api.md": "0c5204c881a8026d6d46ec077623ff945e2aff8acc0c6863e339e199b252930b",
+    "examples/outbound-client/Cargo.toml": "71acd8cb53e050dd32f558ce5e0ae674c0e4eadbe620029ffd4f9ecf0cb4d1df",
+    "examples/outbound-client/src/main.rs": "12d0608d5d645a607b17bb414ae03b5ed6f9a020f67f2ed30361a44c5de8d915",
+    "examples/product-echo/Cargo.toml": "422e1d93bd1b2ba9eb4bee606b910faf40553a765f6671ed55955661d1b214cf",
+    "examples/product-echo/src/lib.rs": "7ab917efcc7799463a0f776f0d7304cce0f0d7a6be43c7539956558721242e3e",
+    "rust-toolchain.toml": "6a95738ee0eea5867a071922541a1ccaac80c63ccba5c947eb78b6130e1b22d3",
+    "sdk/rust/zenss-client-sdk/Cargo.toml": "86810fdb3dd95d6495098a6f5f27d296d6d36b72aa3d44a19a32a3c6f9414143",
+    "sdk/rust/zenss-client-sdk/src/lib.rs": "22436a3aa8e772110bf54efce347bc0fbdc16d63dd36faa5aa1229330baaf5cc"
+  },
+  "format": 1,
+  "sdk_version": "0.1.1",
+  "source_commit": "e995b85ecd8dc72c68baada50731275291844bef"
+}
