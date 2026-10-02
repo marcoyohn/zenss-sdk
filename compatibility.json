@@ -1,0 +1,11 @@
+{
+  "client_policy": "Network clients use protocol compatibility; host compiler matching is not required.",
+  "lock_sha256": "d7af99d5576cd6f0748bdbeb55fb8ec0bda69959e54bafd6ae5b73221de67e04",
+  "native_plugin_policy": "Match the host compiler, target, features and shared dependency graph. Rebuild with host upgrades; no stable Rust ABI.",
+  "protocol": 1,
+  "route_gate_abi": "zenss-route-gate/1",
+  "rust_toolchain": "1.94.1",
+  "sdk_version": "0.2.0",
+  "vendor_inventory_sha256": "1dafadd460c2f8621a7a402d8f7e5ae9098b949fd5b1e0bd956028ae9a08829b",
+  "zenoh": "1.10.1"
+}

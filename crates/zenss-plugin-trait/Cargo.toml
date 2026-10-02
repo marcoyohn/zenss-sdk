@@ -1,0 +1,40 @@
+[package]
+name = "zenss-plugin-trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+description = "ZenSS plugin trait and infrastructure"
+
+[features]
+default = []
+dynamic_plugin = []
+
+[dependencies]
+# Core
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Zenoh Plugin Infrastructure
+zenoh = { workspace = true, features = ["internal", "internal_config", "plugins"] }
+zenoh-plugin-trait.workspace = true
+zenoh-result.workspace = true
+zenoh-util.workspace = true
+
+# For dynamic plugin loading
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+
+# Utilities
+tracing.workspace = true
+lazy_static = "1.4"
+zenss-contracts.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
