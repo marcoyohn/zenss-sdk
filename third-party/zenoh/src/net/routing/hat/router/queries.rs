@@ -392,12 +392,12 @@ impl HatQueriesTrait for Hat {
         mut res: Arc<Resource>,
         node_id: NodeId,
         info: &QueryableInfoType,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
 
         let Some(router) = self.get_router(ctx.src_face, node_id) else {
             tracing::error!(%node_id, "Queryable from unknown router");
-            return;
+            return false;
         };
 
         debug_assert_ne!(router, ctx.tables.zid);
@@ -408,6 +408,7 @@ impl HatQueriesTrait for Hat {
         self.router_qabls.insert(res.clone());
 
         self.propagate_sourced_queryable(ctx.tables, &res, info, Some(ctx.src_face), &router);
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, _id), ret)]

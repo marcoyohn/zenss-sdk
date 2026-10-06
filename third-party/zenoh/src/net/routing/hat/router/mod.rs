@@ -323,7 +323,7 @@ impl HatBaseTrait for Hat {
         Ok(())
     }
 
-    fn new_face(&self) -> Box<dyn Any + Send + Sync> {
+    fn new_face(&self, _tables: &TablesData) -> Box<dyn Any + Send + Sync> {
         Box::new(HatFace::new())
     }
 
@@ -352,6 +352,10 @@ impl HatBaseTrait for Hat {
     ) -> ZResult<()> {
         debug_assert!(self.owns(ctx.src_face));
 
+        #[cfg(feature = "zenss-route-gate")]
+        if ctx.tables.route_gate.is_some() && !self.net().can_admit_native_link(ctx.src_face.zid) {
+            bail!("native topology transport budget exceeded");
+        }
         let link_id = self.net_mut().add_link(transport.clone());
         self.face_hat_mut(ctx.src_face).link_id = link_id;
 
@@ -380,12 +384,32 @@ impl HatBaseTrait for Hat {
                 ctx.src_face.remote_bound.is_south()
             );
 
+            #[cfg(feature = "zenss-route-gate")]
+            let bounded = ctx.tables.route_gate.is_some();
             if let ZExtBody::ZBuf(buf) = mem::take(&mut oam.body) {
+                #[cfg(feature = "zenss-route-gate")]
+                if bounded
+                    && zenoh_buffers::buffer::Buffer::len(&buf)
+                        > crate::net::protocol::linkstate::NATIVE_TOPOLOGY_FRAME_BYTES
+                {
+                    // Refuse this complete OAM frame without tearing down its transport.
+                    return Ok(());
+                }
                 use zenoh_buffers::reader::HasReader;
                 use zenoh_codec::RCodec;
                 let codec = Zenoh080Routing::new();
+                #[cfg(feature = "zenss-route-gate")]
+                let codec = if bounded {
+                    Zenoh080Routing::native_bounded()
+                } else {
+                    codec
+                };
                 let mut reader = buf.reader();
                 let Ok(list): Result<LinkStateList, _> = codec.read(&mut reader) else {
+                    #[cfg(feature = "zenss-route-gate")]
+                    if bounded {
+                        return Ok(());
+                    }
                     bail!("failed to decode link state");
                 };
 
@@ -393,7 +417,12 @@ impl HatBaseTrait for Hat {
 
                 let removed_routers = self
                     .net_mut()
-                    .link_states(list.link_states, ctx.src_face.zid)
+                    .link_states(
+                        list.link_states,
+                        ctx.src_face.zid,
+                        #[cfg(feature = "zenss-route-gate")]
+                        bounded,
+                    )
                     .removed_nodes
                     .into_iter()
                     .map(|(_, zid)| zid)

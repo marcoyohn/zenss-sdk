@@ -59,3 +59,59 @@ When processing a shared control Query, call `authenticated_query_context(runtim
 The native build kit contains stock public Zenoh source plus the reviewed admission hook and upstream licenses. Its deterministic ABI marker/vendor inventory must match the separately delivered host. It excludes private admission/CA implementation. Ordinary Client SDK dependencies continue to use crates.io Zenoh. TLS credentials accept file paths or the matching `*_base64` fields; use exactly one representation per credential, and Debug redacts TLS values.
 
 This is admission infrastructure. It does not finish product bootstrap, trusted multi-router origin propagation, CA rotation, 1/2/4 lane recovery, domain retries or production readiness.
+
+## Optional Router origin native profile (unreleased candidate)
+
+The build kit vendor now exposes `zenoh/zenss-router-origin` in addition to the
+existing default route gate. A native product using `zenoh.workspace = true` selects
+it with `zenoh = { workspace = true, features = ["zenss-router-origin"] }` in its
+manifest, matching a host built with `zenssd/router-origin`. The native marker and
+vtable become `zenss-route-gate/2`; default builds stay `/1`. Match the host target,
+compiler and entire shared feature graph. Profiles are listed in compatibility and
+vendor inventory files. The route command/context DTOs do not change.
+
+This optional hook reserves a bounded Query attachment for private host provenance;
+ordinary application clients supply no such attachment and continue using official
+registry Zenoh. Peer config/signing/policy and CA keys are not public SDK content.
+The candidate is not a release of Lingshu cross-replica business support, and does
+not alter immutable 0.2.0 SDK/Host tags. A matched formal release and target validation
+are required before downstream selection.
+
+
+### Platform query context in the /2 candidate
+
+Use `authenticated_platform_query_context(runtime, &query)` for a privileged
+product-to-product request whose direct Router origin is Platform. Its strict
+`AuthenticatedPlatformQueryContext` exposes only the authenticated source Router,
+issuer and original admission deadline. It uses the same single-use digest/key
+receipt callback as the Client helper; select the expected context before lookup.
+A Platform receipt cannot be decoded by `authenticated_query_context` as a Client,
+and a Client receipt cannot be decoded as Platform. Receipt admission never mints
+Client credentials, report grants or business permission. Products must recheck
+their own application, role, capability and operation deadlines. This helper is an
+unreleased matching /2 addition; it does not require ordinary clients to use the
+native build kit.
+
+### Candidate finite Router admission transfer (not released in v0.2.0)
+
+The matched Router-origin Host accepts these strict, privileged JSON operations
+through `DynamicRuntime::route_gate_credential`, without adding a native trait
+method. The ordinary Client SDK never exposes them.
+
+- `{"operation":"probe_route_authorization_transfer","issuer":"<product>"}`
+  returns `{source, peers}` for configured pinned ownership. Unsupported Hosts fail.
+- `{"operation":"export_route_authorization","audience":"<pinned-router-CN>","command":<existing RouteAuthorizationCommand>}`
+  returns a JSON string containing an opaque finite signed capsule. Only current
+  locally issued grants or applied local revoke tombstones can be exported.
+- `{"operation":"import_route_authorization","source":"<authenticated-router-CN>","capsule":"<opaque-string>"}`
+  returns `null` on installation. A product network adapter must first consume a
+  one-use direct pinned Platform Query receipt and pass its verified source.
+
+Capsules are audience-bound and have a three-second acceptance window. Imported
+CSR provenance is foreign; it cannot issue, independently extend or re-export a
+grant. Same-revision retries keep the first monotonic deadline. Source, CSR and
+parent ownership remain fixed; revocation fences late imports. Remote product
+Drain is unsupported. The receiving lease is shortened by 500ms for the fixed
+250ms clock-anchor tolerance at each Router. Network replication and business
+route-ready proof remain product responsibilities. These operations require the
+candidate matching Host and reviewed topology; they do not enable production.

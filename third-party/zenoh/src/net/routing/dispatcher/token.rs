@@ -53,7 +53,7 @@ impl Face {
             return;
         }
 
-        self.with_mapped_expr(expr, |tables, res| {
+        self.with_mapped_expr(expr, |tables, mut res| {
             let region = self.state.region;
 
             macro_rules! ctx {
@@ -77,18 +77,24 @@ impl Face {
                 Some(RouteCurrentDeclareResult::Noop) => {} // ¯\_(ツ)_/¯
                 Some(RouteCurrentDeclareResult::Breadcrumb { interest }) => {
                     if interest.mode.is_future() {
-                        tables.hats[region].register_token(
+                        if !tables.hats[region].register_token(
                             ctx.reborrow(),
                             id,
                             res.clone(),
                             node_id,
-                        );
+                        ) {
+                            Resource::clean(&mut res);
+                            return;
+                        }
                     }
 
                     tables.hats[interest.src_region].propagate_current_token(ctx, res, interest);
                 }
                 Some(RouteCurrentDeclareResult::NoBreadcrumb) | None => {
-                    tables.hats[region].register_token(ctx, id, res.clone(), node_id);
+                    if !tables.hats[region].register_token(ctx, id, res.clone(), node_id) {
+                        Resource::clean(&mut res);
+                        return;
+                    }
 
                     for dst in tables.hats.regions().collect_vec() {
                         let filter = InterRegionFilter {

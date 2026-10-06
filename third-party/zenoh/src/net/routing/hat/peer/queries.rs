@@ -116,13 +116,24 @@ impl Hat {
             return;
         }
 
-        let face_hat_mut = self.face_hat_mut(dst_face);
-        let (_, qabls_to_notify) = face_hat_mut.local_qabls.insert_simple_resource(
-            res.clone(),
-            *info,
-            || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-            simple_interests,
+        let capacity = self.face_hat(dst_face).local_qabls.native_capacity(
+            res,
+            dst_face,
+            crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
         );
+        let face_hat_mut = self.face_hat_mut(dst_face);
+        let Some((_, qabls_to_notify)) = face_hat_mut
+            .local_qabls
+            .insert_simple_resource_with_capacity(
+                res.clone(),
+                *info,
+                || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
+                simple_interests,
+                capacity,
+            )
+        else {
+            return;
+        };
 
         for update in qabls_to_notify {
             tracing::debug!(dst = %dst_face);
@@ -350,14 +361,25 @@ impl HatQueriesTrait for Hat {
         mut res: Arc<Resource>,
         _node_id: NodeId,
         info: &QueryableInfoType,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
-
-        self.face_hat_mut(ctx.src_face)
+        let Some(prepared) = self
+            .face_hat(ctx.src_face)
             .remote_qabls
-            .entry(id)
-            .and_modify(|(_, old_info)| *old_info = *info)
-            .or_insert_with(|| (res.clone(), *info));
+            .prepare_insert_declaration(
+                id,
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
+                true,
+            )
+        else {
+            return false;
+        };
+
+        let map = &mut self.face_hat_mut(ctx.src_face).remote_qabls;
+        let mapped_res = map.get(&id).map_or_else(|| res.clone(), |(r, _)| r.clone());
+        map.insert_prepared(prepared, (mapped_res, *info));
 
         let new_face_info = self
             .face_hat(ctx.src_face)
@@ -379,6 +401,7 @@ impl HatQueriesTrait for Hat {
                 get_mut_unchecked(ctx).qabl = new_face_info;
             }
         }
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, id, _res, _node_id), ret)]

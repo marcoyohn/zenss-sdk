@@ -19,7 +19,6 @@
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
 use std::{
     any::Any,
-    collections::HashMap,
     fmt::Debug,
     sync::{atomic::AtomicU32, Arc},
 };
@@ -125,8 +124,32 @@ impl HatBaseTrait for Hat {
         Ok(())
     }
 
-    fn new_face(&self) -> Box<dyn Any + Send + Sync> {
-        Box::new(HatFace::new())
+    fn new_face(&self, _tables: &TablesData) -> Box<dyn Any + Send + Sync> {
+        Box::new(HatFace::new(_tables))
+    }
+
+    #[cfg(feature = "zenss-route-gate")]
+    fn native_aggregation_usage(
+        &self,
+        face: &Arc<FaceState>,
+    ) -> super::super::dispatcher::local_resources::NativeAggregationUsage {
+        let hat = self.face_hat(face);
+        hat.local_subs
+            .native_usage()
+            .add(hat.local_qabls.native_usage())
+    }
+
+    #[cfg(feature = "zenss-route-gate")]
+    fn bind_native_aggregation(
+        &self,
+        face: &mut Arc<FaceState>,
+        reservation: &mut super::super::dispatcher::local_resources::NativeAggregationReservation,
+    ) {
+        let hat = self.face_hat_mut(face);
+        let subs = reservation.split(hat.local_subs.native_usage());
+        let qabls = reservation.split(hat.local_qabls.native_usage());
+        hat.local_subs.bind_native_reservation(subs);
+        hat.local_qabls.bind_native_reservation(qabls);
     }
 
     fn new_resource(&self) -> Box<dyn Any + Send + Sync> {
@@ -252,28 +275,36 @@ impl HatContext {
     }
 }
 
+use crate::net::routing::dispatcher::local_resources::{NativeHatKind, NativeHatMap};
+
 struct HatFace {
     next_id: AtomicU32, // @TODO: manage rollover and uniqueness
-    remote_interests: HashMap<InterestId, RemoteInterest>,
+    remote_interests: NativeHatMap<InterestId, RemoteInterest>,
     local_subs: LocalSubscribers,
-    remote_subs: HashMap<SubscriberId, Arc<Resource>>,
+    remote_subs: NativeHatMap<SubscriberId, Arc<Resource>>,
     local_qabls: LocalQueryables,
-    remote_qabls: HashMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
-    local_tokens: HashMap<Arc<Resource>, TokenId>,
-    remote_tokens: HashMap<TokenId, Arc<Resource>>,
+    remote_qabls: NativeHatMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
+    local_tokens: NativeHatMap<Arc<Resource>, TokenId>,
+    remote_tokens: NativeHatMap<TokenId, Arc<Resource>>,
 }
 
 impl HatFace {
-    fn new() -> Self {
+    fn new(_tables: &TablesData) -> Self {
         Self {
             next_id: AtomicU32::new(1),
-            remote_interests: HashMap::new(),
+            remote_interests: NativeHatMap::new(_tables, NativeHatKind::Interest),
+            #[cfg(feature = "zenss-route-gate")]
+            local_subs: LocalSubscribers::with_budget(_tables.native_aggregation_budget.as_ref()),
+            #[cfg(not(feature = "zenss-route-gate"))]
             local_subs: LocalSubscribers::new(),
-            remote_subs: HashMap::new(),
+            remote_subs: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            #[cfg(feature = "zenss-route-gate")]
+            local_qabls: LocalQueryables::with_budget(_tables.native_aggregation_budget.as_ref()),
+            #[cfg(not(feature = "zenss-route-gate"))]
             local_qabls: LocalQueryables::new(),
-            remote_qabls: HashMap::new(),
-            local_tokens: HashMap::new(),
-            remote_tokens: HashMap::new(),
+            remote_qabls: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            local_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            remote_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
         }
     }
 }

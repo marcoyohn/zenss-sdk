@@ -61,6 +61,8 @@ use crate::net::{
 
 #[derive(Debug)]
 pub(crate) struct InterestState {
+    #[cfg(feature = "zenss-route-gate")]
+    _native_reservation: Option<super::interests::NativeInterestReservation>,
     face: FaceId,
     pub(crate) options: InterestOptions,
     pub(crate) res: Option<Arc<Resource>>,
@@ -73,8 +75,13 @@ impl InterestState {
         options: InterestOptions,
         res: Option<Arc<Resource>>,
         finalized: bool,
+        #[cfg(feature = "zenss-route-gate")] native_reservation: Option<
+            super::interests::NativeInterestReservation,
+        >,
     ) -> Self {
         let mut interest = Self {
+            #[cfg(feature = "zenss-route-gate")]
+            _native_reservation: native_reservation,
             face,
             options,
             res,
@@ -113,6 +120,10 @@ impl PartialEq<RemoteInterest> for InterestState {
 pub(crate) type FaceId = usize;
 
 pub struct FaceState {
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) native_interest_budget: Arc<super::interests::NativeInterestBudget>,
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) next_native_interest_id: std::sync::atomic::AtomicU32,
     pub(crate) id: FaceId,
     pub(crate) zid: ZenohIdProto,
     pub(crate) whatami: WhatAmI,
@@ -120,7 +131,7 @@ pub struct FaceState {
     pub(crate) remote_bound: Bound,
     pub(crate) primitives: Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>,
     pub(crate) local_interests: HashMap<InterestId, InterestState>,
-    pub(crate) remote_key_interests: HashMap<InterestId, Option<Arc<Resource>>>,
+    pub(crate) remote_key_interests: HashMap<InterestId, super::interests::KeyInterestState>,
     pub(crate) pending_current_interests: HashMap<InterestId, PendingCurrentInterest>,
     pub(crate) local_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,
@@ -152,8 +163,15 @@ impl FaceStateBuilder {
         remote_bound: Bound,
         primitives: Arc<dyn EPrimitives + Send + Sync>,
         hats: RegionMap<Box<dyn Any + Send + Sync>>,
+        #[cfg(feature = "zenss-route-gate")] native_interest_budget: Arc<
+            super::interests::NativeInterestBudget,
+        >,
     ) -> Self {
         FaceStateBuilder(FaceState {
+            #[cfg(feature = "zenss-route-gate")]
+            native_interest_budget,
+            #[cfg(feature = "zenss-route-gate")]
+            next_native_interest_id: std::sync::atomic::AtomicU32::new(1),
             id,
             zid,
             whatami: WhatAmI::default(),
@@ -441,9 +459,15 @@ impl Face {
             drop(rtables);
             let mut wtables = self.tables.tables.write().unwrap();
             let tables = &mut *wtables;
-            let mut res = Resource::make_resource(tables, &mut prefix, expr.suffix.as_ref());
+            let Some(mut res) = Resource::make_resource(tables, &mut prefix, expr.suffix.as_ref())
+            else {
+                return;
+            };
             matches.push(Arc::downgrade(&res));
-            Resource::match_resource(&tables.data, &mut res, matches);
+            if !Resource::match_resource(&tables.data, &mut res, matches) {
+                Resource::clean(&mut res);
+                return;
+            }
             (res, wtables)
         };
 
@@ -518,10 +542,16 @@ impl Face {
                     .unwrap_or_default();
                 drop(rtables);
                 let mut wtables = self.tables.tables.write().unwrap();
-                let mut res =
-                    Resource::make_resource(&mut wtables, &mut prefix, expr.suffix.as_ref());
+                let Some(mut res) =
+                    Resource::make_resource(&mut wtables, &mut prefix, expr.suffix.as_ref())
+                else {
+                    return;
+                };
                 matches.push(Arc::downgrade(&res));
-                Resource::match_resource(&wtables.data, &mut res, matches);
+                if !Resource::match_resource(&wtables.data, &mut res, matches) {
+                    Resource::clean(&mut res);
+                    return;
+                }
                 (Some(res), wtables)
             } else {
                 tracing::error!(?prefix, suffix = ?expr.suffix, "Unknown resource");
@@ -819,6 +849,15 @@ impl Primitives for Face {
             }
         }
         get_mut_unchecked(ctx.src_face).local_interests.clear();
+        for interest in get_mut_unchecked(ctx.src_face)
+            .remote_key_interests
+            .values_mut()
+        {
+            if let Some(mut res) = interest.res.take() {
+                Resource::clean(&mut res);
+            }
+        }
+        get_mut_unchecked(ctx.src_face).remote_key_interests.clear();
 
         hats[region].close_face(ctx);
 

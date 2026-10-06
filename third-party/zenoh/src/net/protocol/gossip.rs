@@ -68,8 +68,14 @@ impl std::fmt::Debug for Node {
 pub(crate) struct Link {
     transport: TransportUnicast,
     zid: ZenohIdProto,
+    #[cfg(not(feature = "zenss-route-gate"))]
     mappings: VecMap<ZenohIdProto>,
+    #[cfg(feature = "zenss-route-gate")]
+    mappings: std::collections::BTreeMap<usize, ZenohIdProto>,
+    #[cfg(not(feature = "zenss-route-gate"))]
     local_mappings: VecMap<u64>,
+    #[cfg(feature = "zenss-route-gate")]
+    local_mappings: std::collections::BTreeMap<usize, u64>,
     remote_bound: Bound,
 }
 
@@ -79,26 +85,43 @@ impl Link {
         Link {
             transport,
             zid,
-            mappings: VecMap::new(),
-            local_mappings: VecMap::new(),
+            mappings: Default::default(),
+            local_mappings: Default::default(),
             remote_bound,
         }
     }
 
     #[inline]
     fn set_zid_mapping(&mut self, psid: u64, zid: ZenohIdProto) {
-        self.mappings.insert(psid.try_into().unwrap(), zid);
+        let Ok(id) = usize::try_from(psid) else {
+            return;
+        };
+        // Remapping a recycled native ID must not retain the old local context.
+        #[cfg(feature = "zenss-route-gate")]
+        if self.mappings.get(&id).is_some_and(|old| *old != zid) {
+            self.local_mappings.remove(&id);
+        }
+        self.mappings.insert(id, zid);
     }
 
     #[inline]
     fn get_zid(&self, psid: &u64) -> Option<&ZenohIdProto> {
-        self.mappings.get((*psid).try_into().unwrap())
+        let id = usize::try_from(*psid).ok()?;
+        #[cfg(feature = "zenss-route-gate")]
+        {
+            self.mappings.get(&id)
+        }
+        #[cfg(not(feature = "zenss-route-gate"))]
+        {
+            self.mappings.get(id)
+        }
     }
 
     #[inline]
     fn set_local_psid_mapping(&mut self, psid: u64, local_psid: u64) {
-        self.local_mappings
-            .insert(psid.try_into().unwrap(), local_psid);
+        if let Ok(id) = usize::try_from(psid) {
+            self.local_mappings.insert(id, local_psid);
+        }
     }
 }
 
@@ -160,6 +183,8 @@ impl Gossip {
         let idx = self.graph.add_node(node);
         for link in self.links.values_mut() {
             if let Some((psid, _)) = link.mappings.iter().find(|(_, p)| **p == zid) {
+                #[cfg(feature = "zenss-route-gate")]
+                let psid = *psid;
                 link.local_mappings.insert(psid, idx.index() as u64);
             }
         }
@@ -271,7 +296,21 @@ impl Gossip {
         link_states: Vec<LinkState>,
         src: ZenohIdProto,
         src_whatami: WhatAmI,
+        #[cfg(feature = "zenss-route-gate")] bounded: bool,
     ) {
+        #[cfg(feature = "zenss-route-gate")]
+        if bounded {
+            let Some(link) = self.links.values().find(|link| link.zid == src) else {
+                return;
+            };
+            if !super::linkstate::admit_native_topology(
+                &link_states,
+                &link.mappings,
+                self.graph.node_weights().map(|node| node.zid),
+            ) {
+                return;
+            }
+        }
         tracing::trace!("{} Received from {} raw: {:?}", self.name, src, link_states);
         let strong_runtime = self.runtime.upgrade().unwrap();
 
@@ -382,6 +421,10 @@ impl Gossip {
                 }
             }
 
+            #[cfg(feature = "zenss-route-gate")]
+            if bounded {
+                continue;
+            }
             if self.autoconnect.should_autoconnect(zid, whatami) {
                 // Connect discovered peers (only if locators are available)
                 if let Some(locators) = locators {
@@ -418,6 +461,13 @@ impl Gossip {
     }
 
     #[allow(clippy::incompatible_msrv)]
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) fn can_admit_native_link(&self, zid: ZenohIdProto) -> bool {
+        self.links.len() < super::linkstate::NATIVE_TOPOLOGY_LINKS
+            && (self.get_idx(&zid).is_some()
+                || self.graph.node_count() < super::linkstate::NATIVE_TOPOLOGY_NODES)
+    }
+
     pub(crate) fn add_link(&mut self, transport: TransportUnicast, remote_bound: Bound) -> usize {
         let free_index = {
             let mut i = 0;
@@ -524,8 +574,89 @@ impl Gossip {
 
         if let Some(idx) = self.get_idx(zid) {
             self.graph.remove_node(idx);
+            #[cfg(feature = "zenss-route-gate")]
+            for link in self.links.values_mut() {
+                link.local_mappings
+                    .retain(|_, local| *local != idx.index() as u64);
+            }
         }
 
         vec![]
+    }
+}
+
+#[cfg(all(test, feature = "zenss-route-gate"))]
+mod native_topology_tests {
+    use super::super::{linkstate::NATIVE_TOPOLOGY_NODES, network::native_topology_tests::pair};
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gossip_admission_is_atomic_and_remapped_contexts_reclaim() {
+        let (a, b, transport) = pair().await;
+        let peer: ZenohIdProto = b.zid().into();
+        let mut gossip = Gossip::new(
+            "bounded-gossip".into(),
+            a.zid().into(),
+            a.clone(),
+            WhatAmIMatcher::empty(),
+            AutoConnect::disabled(),
+            false,
+        );
+        gossip.links.insert(0, Link::new(transport, Bound::North));
+        for id in 0..NATIVE_TOPOLOGY_NODES - 1 {
+            gossip.add_node(Node {
+                zid: if id == 0 {
+                    peer
+                } else {
+                    format!("{:x}", 0x2000 + id).parse().unwrap()
+                },
+                whatami: Some(WhatAmI::Router),
+                locators: None,
+                sn: 1,
+                is_gateway: false,
+            });
+        }
+        let state = |psid, zid, sn| LinkState {
+            psid,
+            zid: Some(zid),
+            sn,
+            whatami: Some(WhatAmI::Router),
+            locators: None,
+            links: vec![],
+            link_weights: None,
+            is_gateway: false,
+        };
+        let link = gossip.links.get_mut(0).unwrap();
+        link.set_zid_mapping(65535, peer);
+        link.set_local_psid_mapping(65535, 1);
+        let old_maps = link.mappings.clone();
+        let old_local = link.local_mappings.clone();
+        let extra: ZenohIdProto = "ffff".parse().unwrap();
+        gossip.link_states(
+            vec![state(65535, peer, 20), state(2, extra, 1)],
+            peer,
+            WhatAmI::Router,
+            true,
+        );
+        assert_eq!(gossip.links[0].mappings, old_maps);
+        assert_eq!(gossip.links[0].local_mappings, old_local);
+        assert_eq!(gossip.graph[NodeIndex::new(1)].sn, 1);
+        assert_eq!(gossip.graph.node_count(), NATIVE_TOPOLOGY_NODES);
+        // Recycle a sparse wire ID; the old node context must disappear immediately.
+        let survivor = gossip.graph[NodeIndex::new(2)].zid;
+        let link = gossip.links.get_mut(0).unwrap();
+        link.set_zid_mapping(65535, survivor);
+        assert!(!link.local_mappings.contains_key(&65535));
+        gossip.link_states(vec![state(65535, survivor, 2)], peer, WhatAmI::Router, true);
+        assert_eq!(gossip.links[0].local_mappings.get(&65535), Some(&2));
+        gossip.remove_link(&survivor);
+        assert!(gossip.links[0].local_mappings.is_empty());
+        assert_eq!(gossip.links[0].get_zid(&65535), Some(&survivor));
+        assert!(gossip.can_admit_native_link(extra));
+        gossip.remove_link(&peer);
+        assert!(gossip.links.is_empty());
+        drop(gossip);
+        b.close().await.unwrap();
+        a.close().await.unwrap();
     }
 }

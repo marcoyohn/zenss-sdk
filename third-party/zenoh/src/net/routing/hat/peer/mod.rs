@@ -32,7 +32,7 @@ use zenoh_protocol::{
     core::{Bound, Region, WhatAmI, ZenohIdProto},
     network::{
         declare::{self, queryable::ext::QueryableInfoType, QueryableId, SubscriberId, TokenId},
-        interest::{InterestId, InterestOptions},
+        interest::{InterestId, InterestMode, InterestOptions},
         oam::id::OAM_LINKSTATE,
         Declare, DeclareBody, DeclareFinal, Oam,
     },
@@ -258,8 +258,32 @@ impl HatBaseTrait for Hat {
         Ok(())
     }
 
-    fn new_face(&self) -> Box<dyn Any + Send + Sync> {
-        Box::new(HatFace::new())
+    fn new_face(&self, _tables: &TablesData) -> Box<dyn Any + Send + Sync> {
+        Box::new(HatFace::new(_tables))
+    }
+
+    #[cfg(feature = "zenss-route-gate")]
+    fn native_aggregation_usage(
+        &self,
+        face: &Arc<FaceState>,
+    ) -> super::super::dispatcher::local_resources::NativeAggregationUsage {
+        let hat = self.face_hat(face);
+        hat.local_subs
+            .native_usage()
+            .add(hat.local_qabls.native_usage())
+    }
+
+    #[cfg(feature = "zenss-route-gate")]
+    fn bind_native_aggregation(
+        &self,
+        face: &mut Arc<FaceState>,
+        reservation: &mut super::super::dispatcher::local_resources::NativeAggregationReservation,
+    ) {
+        let hat = self.face_hat_mut(face);
+        let subs = reservation.split(hat.local_subs.native_usage());
+        let qabls = reservation.split(hat.local_qabls.native_usage());
+        hat.local_subs.bind_native_reservation(subs);
+        hat.local_qabls.bind_native_reservation(qabls);
     }
 
     fn new_resource(&self) -> Box<dyn Any + Send + Sync> {
@@ -287,23 +311,41 @@ impl HatBaseTrait for Hat {
     ) -> ZResult<()> {
         debug_assert!(self.owns(ctx.src_face));
 
-        if let Some(net) = self.net_mut() {
-            net.add_link(transport.clone(), ctx.src_face.remote_bound);
-        }
-
         // NOTE(regions): we only send/recv initial interests between peers that are mutually north-bound,
         // otherwise we are in PULL mode. In particular, the `open.return_conditions.declares` configuration
         // option doesn't apply to region gateways.
         let do_initial_interest =
             ctx.src_face.region.bound().is_north() && ctx.src_face.remote_bound.is_north();
 
+        let initial = if do_initial_interest {
+            Some(
+                ctx.src_face
+                    .prepare_interest(InterestMode::CurrentFuture, true)
+                    .ok_or_else(|| {
+                        zenoh_result::zerror!("native initial Interest state budget exceeded")
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        #[cfg(feature = "zenss-route-gate")]
+        let bounded = ctx.tables.route_gate.is_some();
+        if let Some(net) = self.net_mut() {
+            #[cfg(feature = "zenss-route-gate")]
+            if bounded && !net.can_admit_native_link(ctx.src_face.zid) {
+                bail!("native topology transport budget exceeded");
+            }
+            net.add_link(transport.clone(), ctx.src_face.remote_bound);
+        }
+
         tracing::debug!(do_initial_interest);
 
-        if do_initial_interest {
+        if let Some(prepared) = initial {
             let face_id = ctx.src_face.id;
             get_mut_unchecked(ctx.src_face).local_interests.insert(
                 INITIAL_INTEREST_ID,
-                InterestState::new(face_id, InterestOptions::ALL, None, false),
+                prepared.state(face_id, InterestOptions::ALL, None, false),
             );
         }
 
@@ -366,19 +408,45 @@ impl HatBaseTrait for Hat {
                 ctx.src_face.remote_bound.is_south()
             );
 
+            #[cfg(feature = "zenss-route-gate")]
+            let bounded = ctx.tables.route_gate.is_some();
             if let ZExtBody::ZBuf(buf) = mem::take(&mut oam.body) {
+                #[cfg(feature = "zenss-route-gate")]
+                if bounded
+                    && zenoh_buffers::buffer::Buffer::len(&buf)
+                        > crate::net::protocol::linkstate::NATIVE_TOPOLOGY_FRAME_BYTES
+                {
+                    // Refuse this complete OAM frame without tearing down its transport.
+                    return Ok(());
+                }
                 if let Some(net) = self.net_mut() {
                     use zenoh_buffers::reader::HasReader;
                     use zenoh_codec::RCodec;
                     let codec = Zenoh080Routing::new();
+                    #[cfg(feature = "zenss-route-gate")]
+                    let codec = if bounded {
+                        Zenoh080Routing::native_bounded()
+                    } else {
+                        codec
+                    };
                     let mut reader = buf.reader();
                     let Ok(list): Result<LinkStateList, _> = codec.read(&mut reader) else {
+                        #[cfg(feature = "zenss-route-gate")]
+                        if bounded {
+                            return Ok(());
+                        }
                         bail!("failed to decode link state");
                     };
 
                     tracing::trace!(linkstate = ?list);
 
-                    net.link_states(list.link_states, ctx.src_face.zid, ctx.src_face.whatami);
+                    net.link_states(
+                        list.link_states,
+                        ctx.src_face.zid,
+                        ctx.src_face.whatami,
+                        #[cfg(feature = "zenss-route-gate")]
+                        bounded,
+                    );
                 }
             }
         }
@@ -486,28 +554,36 @@ impl HatContext {
     }
 }
 
+use crate::net::routing::dispatcher::local_resources::{NativeHatKind, NativeHatMap};
+
 struct HatFace {
     next_id: AtomicU32, // @TODO: manage rollover and uniqueness
-    remote_interests: HashMap<InterestId, RemoteInterest>,
+    remote_interests: NativeHatMap<InterestId, RemoteInterest>,
     local_subs: LocalSubscribers,
-    remote_subs: HashMap<SubscriberId, Arc<Resource>>,
-    local_tokens: HashMap<Arc<Resource>, TokenId>,
-    remote_tokens: HashMap<TokenId, Arc<Resource>>,
+    remote_subs: NativeHatMap<SubscriberId, Arc<Resource>>,
+    local_tokens: NativeHatMap<Arc<Resource>, TokenId>,
+    remote_tokens: NativeHatMap<TokenId, Arc<Resource>>,
     local_qabls: LocalQueryables,
-    remote_qabls: HashMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
+    remote_qabls: NativeHatMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
 }
 
 impl HatFace {
-    fn new() -> Self {
+    fn new(_tables: &TablesData) -> Self {
         Self {
             next_id: AtomicU32::new(1), // In p2p, id 0 is erserved for initial interest
-            remote_interests: HashMap::new(),
+            remote_interests: NativeHatMap::new(_tables, NativeHatKind::Interest),
+            #[cfg(feature = "zenss-route-gate")]
+            local_subs: LocalSubscribers::with_budget(_tables.native_aggregation_budget.as_ref()),
+            #[cfg(not(feature = "zenss-route-gate"))]
             local_subs: LocalSubscribers::new(),
-            remote_subs: HashMap::new(),
-            local_tokens: HashMap::new(),
-            remote_tokens: HashMap::new(),
+            remote_subs: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            local_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            remote_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            #[cfg(feature = "zenss-route-gate")]
+            local_qabls: LocalQueryables::with_budget(_tables.native_aggregation_budget.as_ref()),
+            #[cfg(not(feature = "zenss-route-gate"))]
             local_qabls: LocalQueryables::new(),
-            remote_qabls: HashMap::new(),
+            remote_qabls: NativeHatMap::new(_tables, NativeHatKind::Entity),
         }
     }
 }
@@ -599,6 +675,14 @@ pub(crate) enum NetMut<'a> {
 }
 
 impl NetMut<'_> {
+    #[cfg(feature = "zenss-route-gate")]
+    fn can_admit_native_link(&self, zid: ZenohIdProto) -> bool {
+        match self {
+            Self::Gossip(n) => n.can_admit_native_link(zid),
+            Self::Network(n) => n.can_admit_native_link(zid),
+        }
+    }
+
     pub(crate) fn add_link(self, transport: TransportUnicast, remote_bound: Bound) -> usize {
         match self {
             Self::Gossip(n) => n.add_link(transport, remote_bound),
@@ -618,13 +702,25 @@ impl NetMut<'_> {
         link_states: Vec<LinkState>,
         src: ZenohIdProto,
         src_whatami: WhatAmI,
+        #[cfg(feature = "zenss-route-gate")] bounded: bool,
     ) {
         match self {
             Self::Gossip(n) => {
-                n.link_states(link_states, src, src_whatami);
+                n.link_states(
+                    link_states,
+                    src,
+                    src_whatami,
+                    #[cfg(feature = "zenss-route-gate")]
+                    bounded,
+                );
             }
             Self::Network(n) => {
-                n.link_states(link_states, src);
+                n.link_states(
+                    link_states,
+                    src,
+                    #[cfg(feature = "zenss-route-gate")]
+                    bounded,
+                );
             }
         }
     }

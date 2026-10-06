@@ -9,6 +9,8 @@ publish = false
 [features]
 default = ["dynamic_plugin"]
 dynamic_plugin = []
+# Native product only; the network Client SDK keeps registry Zenoh unchanged.
+router-origin = ["zenoh/zenss-router-origin"]
 
 [lib]
 name = "zenss_plugin_echo"

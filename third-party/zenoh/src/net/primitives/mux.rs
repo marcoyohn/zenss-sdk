@@ -31,7 +31,7 @@ use super::{EPrimitives, Primitives};
 use crate::net::routing::{
     dispatcher::face::{Face, WeakFace},
     gateway::{InterceptorCacheValueType, Resource},
-    interceptor::{has_interceptor, InterceptorContext, InterceptorTrait, InterceptorsChain},
+    interceptor::{InterceptorContext, InterceptorTrait, InterceptorsChain},
     RoutingContext,
 };
 
@@ -51,26 +51,22 @@ impl Mux {
     }
 
     #[inline(always)]
-    fn can_schedule(&self, msg: &mut NetworkMessageMut) -> bool {
-        if !has_interceptor(&self.interceptor) {
-            return true;
-        }
+    fn schedule_context(&self, msg: NetworkMessageMut, ctx: &mut dyn InterceptorContext) -> bool {
         match self.interceptor.load().as_ref() {
-            Some(interceptor) => interceptor.intercept(
-                msg,
-                &mut MuxContext {
-                    mux: self,
-                    cache: OnceCell::new(),
-                    expr: OnceCell::new(),
-                },
-            ),
-            None => true,
+            Some(chain) => chain.schedule(msg, ctx, &self.handler),
+            None => self.handler.schedule(msg).unwrap_or(false),
         }
     }
-
     #[inline(always)]
-    fn schedule(&self, mut msg: NetworkMessageMut) -> bool {
-        self.can_schedule(&mut msg) && self.handler.schedule(msg).unwrap_or(false)
+    fn schedule(&self, msg: NetworkMessageMut) -> bool {
+        self.schedule_context(
+            msg,
+            &mut MuxContext {
+                mux: self,
+                cache: OnceCell::new(),
+                expr: OnceCell::new(),
+            },
+        )
     }
 }
 
@@ -141,7 +137,7 @@ impl EPrimitives for Mux {
     fn send_interest(&self, ctx: RoutingContext<&mut Interest>) -> bool {
         let interest_id = ctx.msg.id;
 
-        let mut msg = NetworkMessageMut {
+        let msg = NetworkMessageMut {
             body: NetworkBodyMut::Interest(ctx.msg),
             reliability: Reliability::Reliable,
         };
@@ -150,8 +146,8 @@ impl EPrimitives for Mux {
             full_expr: ctx.full_expr,
         };
 
-        if self.interceptor.load().intercept(&mut msg, &mut ctx) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self.schedule_context(msg, &mut ctx) {
+            true
         } else {
             // send declare final to avoid timeout on blocked interest
             if let Some(face) = self.face.get().and_then(|f| f.upgrade()) {
@@ -162,7 +158,7 @@ impl EPrimitives for Mux {
     }
 
     fn send_declare(&self, ctx: RoutingContext<&mut Declare>) -> bool {
-        let mut msg = NetworkMessageMut {
+        let msg = NetworkMessageMut {
             body: NetworkBodyMut::Declare(ctx.msg),
             reliability: Reliability::Reliable,
         };
@@ -171,8 +167,7 @@ impl EPrimitives for Mux {
             full_expr: ctx.full_expr,
         };
 
-        self.interceptor.load().intercept(&mut msg, &mut ctx)
-            && self.handler.schedule(msg).unwrap_or(false)
+        self.schedule_context(msg, &mut ctx)
     }
 
     fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
@@ -186,12 +181,12 @@ impl EPrimitives for Mux {
     fn send_request(&self, msg: &mut Request) -> bool {
         let qos = msg.ext_qos;
         let request_id = msg.id;
-        let mut msg = NetworkMessageMut {
+        let msg = NetworkMessageMut {
             body: NetworkBodyMut::Request(msg),
             reliability: Reliability::Reliable,
         };
-        if self.can_schedule(&mut msg) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self.schedule(msg) {
+            true
         } else {
             match self.face.get().and_then(|f| f.upgrade()) {
                 Some(face) => face.send_response_final(&mut ResponseFinal {

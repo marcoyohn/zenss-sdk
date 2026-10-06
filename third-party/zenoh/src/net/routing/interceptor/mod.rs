@@ -97,6 +97,8 @@ impl From<&LinkAuthId> for InterceptorLinkWrapper {
 }
 
 pub(crate) trait InterceptorContext {
+    #[cfg(feature = "zenss-route-gate")]
+    fn set_tx_capacity(&mut self, _capacity: route_gate::QueryCapacity) {}
     #[allow(dead_code)]
     fn face(&self) -> Option<Face>;
     fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str>;
@@ -109,8 +111,22 @@ pub(crate) trait InterceptorContext {
 }
 
 pub(crate) trait InterceptorTrait {
+    #[cfg(feature = "zenss-route-gate")]
+    fn tx_queue(
+        &self,
+    ) -> Option<(
+        &route_gate::tx_queue::TxQueue,
+        &Arc<route_gate::tx_queue::TxBudget>,
+        &dyn route_gate::RouteGate,
+    )> {
+        None
+    }
     fn compute_keyexpr_cache(&self, key_expr: &keyexpr) -> Option<Box<dyn Any + Send + Sync>>;
 
+    #[cfg(feature = "zenss-route-gate")]
+    fn encoded_message_limit(&self) -> Option<usize> {
+        None
+    }
     fn intercept(&self, msg: &mut NetworkMessageMut, ctx: &mut dyn InterceptorContext) -> bool;
 }
 
@@ -153,6 +169,34 @@ pub(crate) struct InterceptorsChain {
 }
 
 impl InterceptorsChain {
+    /// One immutable interceptor snapshot authenticates, classifies and
+    /// schedules the message. Capacity is local context, never a wire priority.
+    pub(crate) fn schedule(
+        &self,
+        mut msg: NetworkMessageMut,
+        ctx: &mut dyn InterceptorContext,
+        transport: &TransportUnicast,
+    ) -> bool {
+        #[cfg(feature = "zenss-route-gate")]
+        {
+            let mut ctx = TxContext {
+                ctx,
+                capacity: route_gate::QueryCapacity::Business,
+            };
+            if !self.intercept(&mut msg, &mut ctx) {
+                return false;
+            }
+            if let Some((queue, budget, gate)) = self.interceptors.iter().find_map(|i| i.tx_queue())
+            {
+                return queue.send(budget, ctx.capacity, msg, transport, gate);
+            }
+        }
+        #[cfg(not(feature = "zenss-route-gate"))]
+        if !self.intercept(&mut msg, ctx) {
+            return false;
+        }
+        transport.schedule(msg).unwrap_or(false)
+    }
     #[allow(dead_code)]
     pub(crate) fn empty() -> Self {
         Self {
@@ -198,6 +242,18 @@ impl InterceptorTrait for InterceptorsChain {
             }
             ctx.index += 1;
         }
+        // A later QoS/timestamp/custom interceptor can change a message after
+        // admission. Recheck its final encoding and prevent BlockFirst from
+        // escaping to a background transport task. Ungated chains are unchanged.
+        #[cfg(feature = "zenss-route-gate")]
+        if let Some(limit) = self
+            .interceptors
+            .iter()
+            .filter_map(|i| i.encoded_message_limit())
+            .min()
+        {
+            return route_gate::bound_encoded_message(msg, limit);
+        }
         true
     }
 }
@@ -223,12 +279,37 @@ pub(crate) fn has_interceptor(interceptor: &ArcSwapOption<InterceptorsChain>) ->
     !atomic_ptr.load(Ordering::Relaxed).is_null()
 }
 
+#[cfg(feature = "zenss-route-gate")]
+struct TxContext<'a> {
+    ctx: &'a mut dyn InterceptorContext,
+    capacity: route_gate::QueryCapacity,
+}
+#[cfg(feature = "zenss-route-gate")]
+impl InterceptorContext for TxContext<'_> {
+    fn set_tx_capacity(&mut self, capacity: route_gate::QueryCapacity) {
+        self.capacity = capacity;
+    }
+    fn face(&self) -> Option<Face> {
+        self.ctx.face()
+    }
+    fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str> {
+        self.ctx.full_expr(msg)
+    }
+    fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>> {
+        self.ctx.get_cache(msg)
+    }
+}
+
 struct ChainContext<'a> {
     ctx: &'a mut dyn InterceptorContext,
     index: usize,
 }
 
 impl InterceptorContext for ChainContext<'_> {
+    #[cfg(feature = "zenss-route-gate")]
+    fn set_tx_capacity(&mut self, capacity: route_gate::QueryCapacity) {
+        self.ctx.set_tx_capacity(capacity);
+    }
     fn face(&self) -> Option<Face> {
         self.ctx.face()
     }

@@ -284,12 +284,12 @@ impl HatTokenTrait for Hat {
         _id: TokenId,
         mut res: Arc<Resource>,
         node_id: NodeId,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
 
         let Some(router) = self.get_router(ctx.src_face, node_id) else {
             tracing::error!(%node_id, "Token from unknown router");
-            return;
+            return false;
         };
 
         debug_assert_ne!(router, ctx.tables.zid);
@@ -298,6 +298,7 @@ impl HatTokenTrait for Hat {
         self.router_tokens.insert(res.clone());
 
         self.propagate_sourced_token(ctx.tables, &res, Some(ctx.src_face), &router);
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, _id), ret)]

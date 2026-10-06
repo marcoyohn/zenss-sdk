@@ -67,7 +67,11 @@ impl Face {
                 send_declare,
             };
 
-            hats[region].register_subscriber(ctx.reborrow(), id, res.clone(), node_id, sub_info);
+            if !hats[region].register_subscriber(ctx.reborrow(), id, res.clone(), node_id, sub_info)
+            {
+                Resource::clean(&mut res);
+                return;
+            }
 
             hats[region].disable_data_routes(&mut res);
 
@@ -189,6 +193,8 @@ fn get_hat_data_route(
             &src_face.region,
             node_id,
             compute_route,
+            #[cfg(feature = "zenss-route-gate")]
+            tables.data.native_resource_budget.as_ref(),
         ),
         None => compute_route(),
     }
@@ -226,6 +232,8 @@ fn get_data_route(
             &src_face.region,
             node_id,
             compute_route,
+            #[cfg(feature = "zenss-route-gate")]
+            tables.data.native_resource_budget.as_ref(),
         ),
         None => compute_route(),
     }

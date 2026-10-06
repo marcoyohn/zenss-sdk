@@ -978,6 +978,13 @@ impl Runtime {
         &self,
         gate: Arc<dyn super::routing::interceptor::route_gate::RouteGate>,
     ) -> ZResult<()> {
+        let _control_lock = self
+            .state
+            .router
+            .tables
+            .ctrl_lock
+            .lock()
+            .map_err(|_| zenoh_result::zerror!("route gate control lock unavailable"))?;
         let mut tables = self
             .state
             .router
@@ -991,6 +998,60 @@ impl Runtime {
             )
             .into());
         }
+        // Host validates before Gateway construction; guard direct native callers too.
+        if tables.hats.iter().count() > 14
+            || tables
+                .hats
+                .regions()
+                .any(|r| matches!(r, zenoh_protocol::core::Region::South { id, .. } if id >= 4))
+        {
+            return Err(zenoh_result::zerror!("native region count exceeds gate budget").into());
+        }
+        if !tables.data.native_hat_budget.can_enable() {
+            return Err(
+                zenoh_result::zerror!("existing native hat maps exceed gate budget").into(),
+            );
+        }
+        if !tables.data.native_interest_budget.can_enable() {
+            return Err(zenoh_result::zerror!(
+                "existing native Interest state exceeds gate budget"
+            )
+            .into());
+        }
+        let aggregation_budget = Arc::new(
+            super::routing::dispatcher::local_resources::NativeAggregationBudget::with_gate(
+                gate.clone(),
+            ),
+        );
+        let mut aggregation_usage =
+            super::routing::dispatcher::local_resources::NativeAggregationUsage::default();
+        for face in tables.data.faces.values() {
+            for (_, hat) in tables.hats.iter() {
+                aggregation_usage = aggregation_usage.add(hat.native_aggregation_usage(face));
+            }
+        }
+        let mut aggregation_reservation = aggregation_budget
+            .reserve(aggregation_usage)
+            .ok_or_else(|| {
+                zenoh_result::zerror!("existing native aggregation exceeds gate budget")
+            })?;
+        tables.data.native_resource_budget = Some(
+            super::routing::dispatcher::resource::Resource::install_native_budget(
+                &tables.data.root_res,
+            )
+            .ok_or_else(|| zenoh_result::zerror!("existing native resources exceed gate budget"))?,
+        );
+        let tables = &mut *tables;
+        for face in tables.data.faces.values_mut() {
+            for (_, hat) in tables.hats.iter() {
+                hat.bind_native_aggregation(face, &mut aggregation_reservation);
+            }
+        }
+        tables.data.native_aggregation_budget = Some(aggregation_budget);
+        tables.data.native_interest_budget.bind_gate(gate.clone());
+        tables.data.native_interest_budget.enable();
+        tables.data.native_hat_budget.bind_gate(gate.clone());
+        tables.data.native_hat_budget.enable();
         tables.data.route_gate = Some(gate.clone());
         tables.data.interceptors.insert(
             0,

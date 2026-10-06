@@ -114,13 +114,24 @@ impl Hat {
             return;
         }
 
-        let face_hat_mut = self.face_hat_mut(dst_face);
-        let (_, subs_to_notify) = face_hat_mut.local_subs.insert_simple_resource(
-            res.clone(),
-            *info,
-            || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-            simple_interests,
+        let capacity = self.face_hat(dst_face).local_subs.native_capacity(
+            res,
+            dst_face,
+            crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Subscriber,
         );
+        let face_hat_mut = self.face_hat_mut(dst_face);
+        let Some((_, subs_to_notify)) = face_hat_mut
+            .local_subs
+            .insert_simple_resource_with_capacity(
+                res.clone(),
+                *info,
+                || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
+                simple_interests,
+                capacity,
+            )
+        else {
+            return;
+        };
 
         for update in subs_to_notify {
             tracing::debug!(dst = %dst_face);
@@ -326,8 +337,21 @@ impl HatPubSubTrait for Hat {
         mut res: Arc<Resource>,
         _node_id: NodeId,
         info: &SubscriberInfo,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
+        let Some(prepared) = self
+            .face_hat(ctx.src_face)
+            .remote_subs
+            .prepare_insert_declaration(
+                id,
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Subscriber,
+                true,
+            )
+        else {
+            return false;
+        };
 
         {
             let res = get_mut_unchecked(&mut res);
@@ -349,7 +373,8 @@ impl HatPubSubTrait for Hat {
 
         self.face_hat_mut(ctx.src_face)
             .remote_subs
-            .insert(id, res.clone());
+            .insert_prepared(prepared, res.clone());
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, _res, _node_id), ret)]

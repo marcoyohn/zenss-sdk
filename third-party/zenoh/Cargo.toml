@@ -62,6 +62,7 @@ status = "actively-developed"
 
 [features]
 zenss-route-gate = ["internal", "unstable"]
+zenss-router-origin = ["zenss-route-gate"]
 auth_pubkey = ["zenoh-transport/auth_pubkey"]
 auth_usrpwd = ["zenoh-transport/auth_usrpwd"]
 default = [
@@ -413,6 +414,7 @@ version = "=1.10.1"
 version = "=1.10.1"
 
 [dependencies.zenoh-transport]
+path = "../zenoh-transport"
 version = "=1.10.1"
 default-features = false
 

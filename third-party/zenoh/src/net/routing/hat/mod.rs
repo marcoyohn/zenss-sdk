@@ -184,7 +184,22 @@ impl Clone for Remote {
 pub(crate) trait HatBaseTrait: Any {
     fn init(&mut self, tables: &mut TablesData, runtime: Runtime) -> ZResult<()>;
 
-    fn new_face(&self) -> Box<dyn Any + Send + Sync>;
+    fn new_face(&self, tables: &TablesData) -> Box<dyn Any + Send + Sync>;
+
+    #[cfg(feature = "zenss-route-gate")]
+    fn native_aggregation_usage(
+        &self,
+        _face: &Arc<FaceState>,
+    ) -> super::dispatcher::local_resources::NativeAggregationUsage {
+        Default::default()
+    }
+    #[cfg(feature = "zenss-route-gate")]
+    fn bind_native_aggregation(
+        &self,
+        _face: &mut Arc<FaceState>,
+        _reservation: &mut super::dispatcher::local_resources::NativeAggregationReservation,
+    ) {
+    }
 
     fn new_resource(&self) -> Box<dyn Any + Send + Sync>;
 
@@ -360,6 +375,14 @@ pub(crate) enum RouteInterestResult {
 ///   1. [`HatInterestTrait::route_current_token`] on the north hat.
 ///   2. [`HatInterestTrait::propagate_current_token`] on the owner south hat, iff the msg is intended for it.
 pub(crate) trait HatInterestTrait {
+    fn prepare_remote_interest(
+        &self,
+        _face: &Arc<FaceState>,
+        _msg: &Interest,
+    ) -> Option<Option<super::dispatcher::local_resources::NativeHatInsert<InterestId>>> {
+        Some(None)
+    }
+
     fn route_interest(
         &mut self,
         ctx: DispatcherContext,
@@ -426,6 +449,7 @@ pub(crate) trait HatInterestTrait {
         ctx: DispatcherContext,
         msg: &Interest,
         res: Option<Arc<Resource>>,
+        prepared: Option<super::dispatcher::local_resources::NativeHatInsert<InterestId>>,
     );
 
     fn unregister_interest(
@@ -471,7 +495,7 @@ pub(crate) trait HatPubSubTrait {
         res: Arc<Resource>,
         nid: NodeId,
         info: &SubscriberInfo,
-    );
+    ) -> bool;
 
     /// Unregister a subscriber entity.
     ///
@@ -560,7 +584,7 @@ pub(crate) trait HatQueriesTrait {
         res: Arc<Resource>,
         nid: NodeId,
         info: &QueryableInfoType,
-    );
+    ) -> bool;
 
     /// Unregister a queryable entity.
     ///
@@ -644,7 +668,7 @@ pub(crate) trait HatTokenTrait {
         id: TokenId,
         res: Arc<Resource>,
         nid: NodeId,
-    );
+    ) -> bool;
 
     /// Unregister a token entity.
     ///

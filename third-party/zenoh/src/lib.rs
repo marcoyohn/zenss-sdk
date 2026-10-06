@@ -236,8 +236,10 @@ lazy_static::lazy_static!(
     static ref LONG_VERSION: String = format!("{} built with {}", GIT_VERSION, env!("RUSTC_VERSION"));
 );
 
-#[cfg(feature = "zenss-route-gate")]
-const GIT_COMMIT: &str = "zenss-route-gate-1";
+#[cfg(feature = "zenss-router-origin")]
+const GIT_COMMIT: &str = "zenssroutegate2_resourcebudget12";
+#[cfg(all(feature = "zenss-route-gate", not(feature = "zenss-router-origin")))]
+const GIT_COMMIT: &str = "zenssroutegate1_resourcebudget12";
 #[cfg(not(feature = "zenss-route-gate"))]
 const GIT_COMMIT: &str = git_version::git_version!(
     args = [
@@ -257,6 +259,7 @@ pub const FEATURES: &str = zenoh_util::concat_enabled_features!(
     prefix = "zenoh",
     features = [
         "zenss-route-gate",
+        "zenss-router-origin",
         "auth_pubkey",
         "auth_usrpwd",
         "shared-memory",
@@ -1075,7 +1078,8 @@ pub mod internal {
     #[cfg(feature = "zenss-route-gate")]
     pub mod route_gate {
         pub use crate::net::routing::interceptor::route_gate::{
-            RouteAction, RouteFlow, RouteGate, RouteRequest, RouteSubject,
+            NativeTxOutcome, QueryCapacity, QueryCapacitySource, RouteAction, RouteFlow, RouteGate,
+            RouteRequest, RouteSubject,
         };
     }
     /// Plugins support

@@ -80,8 +80,14 @@ impl std::fmt::Debug for Node {
 pub(crate) struct Link {
     pub(crate) transport: TransportUnicast,
     zid: ZenohIdProto,
+    #[cfg(not(feature = "zenss-route-gate"))]
     mappings: VecMap<ZenohIdProto>,
+    #[cfg(feature = "zenss-route-gate")]
+    mappings: std::collections::BTreeMap<usize, ZenohIdProto>,
+    #[cfg(not(feature = "zenss-route-gate"))]
     local_mappings: VecMap<u64>,
+    #[cfg(feature = "zenss-route-gate")]
+    local_mappings: std::collections::BTreeMap<usize, u64>,
 }
 
 impl Link {
@@ -90,30 +96,55 @@ impl Link {
         Link {
             transport,
             zid,
-            mappings: VecMap::new(),
-            local_mappings: VecMap::new(),
+            mappings: Default::default(),
+            local_mappings: Default::default(),
         }
     }
 
     #[inline]
     pub(crate) fn set_zid_mapping(&mut self, psid: u64, zid: ZenohIdProto) {
-        self.mappings.insert(psid.try_into().unwrap(), zid);
+        let Ok(id) = usize::try_from(psid) else {
+            return;
+        };
+        // Remapping a recycled native ID must not retain the old local context.
+        #[cfg(feature = "zenss-route-gate")]
+        if self.mappings.get(&id).is_some_and(|old| *old != zid) {
+            self.local_mappings.remove(&id);
+        }
+        self.mappings.insert(id, zid);
     }
 
     #[inline]
     pub(crate) fn get_zid(&self, psid: &u64) -> Option<&ZenohIdProto> {
-        self.mappings.get((*psid).try_into().unwrap())
+        let id = usize::try_from(*psid).ok()?;
+        #[cfg(feature = "zenss-route-gate")]
+        {
+            self.mappings.get(&id)
+        }
+        #[cfg(not(feature = "zenss-route-gate"))]
+        {
+            self.mappings.get(id)
+        }
     }
 
     #[inline]
     pub(crate) fn set_local_psid_mapping(&mut self, psid: u64, local_psid: u64) {
-        self.local_mappings
-            .insert(psid.try_into().unwrap(), local_psid);
+        if let Ok(id) = usize::try_from(psid) {
+            self.local_mappings.insert(id, local_psid);
+        }
     }
 
     #[inline]
     pub(crate) fn get_local_psid(&self, psid: &u64) -> Option<&u64> {
-        self.local_mappings.get((*psid).try_into().unwrap())
+        let id = usize::try_from(*psid).ok()?;
+        #[cfg(feature = "zenss-route-gate")]
+        {
+            self.local_mappings.get(&id)
+        }
+        #[cfg(not(feature = "zenss-route-gate"))]
+        {
+            self.local_mappings.get(id)
+        }
     }
 }
 
@@ -299,6 +330,8 @@ impl Network {
         let idx = self.graph.add_node(node);
         for link in self.links.values_mut() {
             if let Some((psid, _)) = link.mappings.iter().find(|(_, p)| **p == zid) {
+                #[cfg(feature = "zenss-route-gate")]
+                let psid = *psid;
                 link.local_mappings.insert(psid, idx.index() as u64);
             }
         }
@@ -563,7 +596,11 @@ impl Network {
             .collect::<Vec<_>>()
     }
 
-    fn process_singlehop_gossip_linkstate(&mut self, link_states: Vec<LocalLinkState>) -> Changes {
+    fn process_singlehop_gossip_linkstate(
+        &mut self,
+        link_states: Vec<LocalLinkState>,
+        #[cfg(feature = "zenss-route-gate")] bounded: bool,
+    ) -> Changes {
         let mut changes = Changes::default();
 
         for ls in link_states.into_iter() {
@@ -623,6 +660,10 @@ impl Network {
 
                 if self.autoconnect.should_autoconnect(ls.zid, ls.whatami) {
                     // SAFETY if we reached this point locators are not None
+                    #[cfg(feature = "zenss-route-gate")]
+                    if bounded {
+                        continue;
+                    }
                     self.connect_discovered_peer(ls.zid, ls.locators.unwrap());
                 }
             }
@@ -697,7 +738,21 @@ impl Network {
         &mut self,
         link_states: Vec<LinkState>,
         src: ZenohIdProto,
+        #[cfg(feature = "zenss-route-gate")] bounded: bool,
     ) -> Changes {
+        #[cfg(feature = "zenss-route-gate")]
+        if bounded {
+            let Some(link) = self.links.values().find(|link| link.zid == src) else {
+                return Changes::default();
+            };
+            if !super::linkstate::admit_native_topology(
+                &link_states,
+                &link.mappings,
+                self.graph.node_weights().map(|node| node.zid),
+            ) {
+                return Changes::default();
+            }
+        }
         tracing::trace!("{} Received from {} raw: {:?}", self.name, src, link_states);
 
         let link_states = self.convert_to_local_link_states(link_states, src);
@@ -712,7 +767,11 @@ impl Network {
         }
 
         if !self.full_linkstate && !self.gossip_multihop {
-            return self.process_singlehop_gossip_linkstate(link_states);
+            return self.process_singlehop_gossip_linkstate(
+                link_states,
+                #[cfg(feature = "zenss-route-gate")]
+                bounded,
+            );
         }
 
         let mut new_nodes = vec![];
@@ -805,7 +864,11 @@ impl Network {
         new_nodes.retain(|idx| !removed.iter().any(|(r_idx, _)| r_idx == idx));
         updated_nodes.retain(|idx| !removed.iter().any(|(r_idx, _)| r_idx == idx));
 
-        if self.autoconnect.is_enabled() {
+        #[cfg(feature = "zenss-route-gate")]
+        let allow_autoconnect = !bounded;
+        #[cfg(not(feature = "zenss-route-gate"))]
+        let allow_autoconnect = true;
+        if allow_autoconnect && self.autoconnect.is_enabled() {
             // Connect discovered peers
             for idx in new_nodes.iter().chain(updated_nodes.iter()) {
                 let node = &self.graph[*idx];
@@ -825,6 +888,13 @@ impl Network {
             updated_nodes: vec![],
             removed_nodes: removed,
         }
+    }
+
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) fn can_admit_native_link(&self, zid: ZenohIdProto) -> bool {
+        self.links.len() < super::linkstate::NATIVE_TOPOLOGY_LINKS
+            && (self.get_idx(&zid).is_some()
+                || self.graph.node_count() < super::linkstate::NATIVE_TOPOLOGY_NODES)
     }
 
     pub(crate) fn add_link(&mut self, transport: TransportUnicast) -> LinkId {
@@ -1036,6 +1106,11 @@ impl Network {
         for (idx, _) in &disconnected {
             tracing::debug!("Remove node {}", &self.graph[*idx].zid);
             self.graph.remove_node(*idx).unwrap();
+            #[cfg(feature = "zenss-route-gate")]
+            for link in self.links.values_mut() {
+                link.local_mappings
+                    .retain(|_, local| *local != idx.index() as u64);
+            }
         }
         disconnected
     }
@@ -1324,6 +1399,8 @@ mod tests {
                 },
             ],
             p1_zid,
+            #[cfg(feature = "zenss-route-gate")]
+            false,
         );
 
         net.link_states(
@@ -1360,6 +1437,8 @@ mod tests {
                 },
             ],
             p2_zid,
+            #[cfg(feature = "zenss-route-gate")]
+            false,
         );
 
         assert_eq!(
@@ -1394,5 +1473,304 @@ mod tests {
             1,
             "b1's links info in a's graph should be non-empty"
         );
+    }
+}
+
+#[cfg(all(test, feature = "zenss-route-gate"))]
+pub(super) mod native_topology_tests {
+    use super::*;
+    use crate::net::{
+        routing::interceptor::route_gate::{RouteGate, RouteRequest, RouteSubject},
+        runtime::RuntimeBuilder,
+    };
+    use std::{sync::Arc, time::Duration};
+    struct Allow;
+    impl RouteGate for Allow {
+        fn authorize(&self, _: &RouteSubject, _: &RouteRequest<'_>) -> bool {
+            true
+        }
+    }
+    pub(in crate::net::protocol) async fn pair() -> (Runtime, Runtime, TransportUnicast) {
+        let config = crate::Config::from_json5(r#"{id:"aa",mode:"router",listen:{endpoints:["tcp/127.0.0.1:0"]},scouting:{multicast:{enabled:false}}}"#).unwrap();
+        let mut a = RuntimeBuilder::new(config).build().await.unwrap();
+        a.install_route_gate(Arc::new(Allow)).unwrap();
+        a.start().await.unwrap();
+        let config = crate::Config::from_json5(&format!(r#"{{id:"bb",mode:"router",listen:{{endpoints:[]}},connect:{{endpoints:["{}"]}},scouting:{{multicast:{{enabled:false}}}}}}"#, a.get_locators()[0])).unwrap();
+        let mut b = RuntimeBuilder::new(config).build().await.unwrap();
+        b.install_route_gate(Arc::new(Allow)).unwrap();
+        b.start().await.unwrap();
+        let transport = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(transport) = a.manager().get_transport_unicast(&b.zid().into()).await {
+                    break transport;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        (a, b, transport)
+    }
+    fn zid(id: usize) -> ZenohIdProto {
+        format!("{:x}", 0x1000 + id).parse().unwrap()
+    }
+    fn state(psid: u64, zid: ZenohIdProto, sn: u64) -> LinkState {
+        LinkState {
+            psid,
+            zid: Some(zid),
+            sn,
+            whatami: Some(WhatAmI::Router),
+            locators: None,
+            links: vec![],
+            link_weights: None,
+            is_gateway: false,
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_and_mapping_pressure_is_atomic_and_tree_indices_reclaim() {
+        use crate::net::protocol::linkstate::{
+            NATIVE_TOPOLOGY_LINKS, NATIVE_TOPOLOGY_MAPPINGS, NATIVE_TOPOLOGY_NODES,
+        };
+        let (a, b, transport) = pair().await;
+        let mut net = Network::new(
+            "bounded-test".into(),
+            a.zid().into(),
+            a.clone(),
+            true,
+            false,
+            false,
+            WhatAmIMatcher::empty(),
+            AutoConnect::disabled(),
+            HashMap::new(),
+            Bound::North,
+        );
+        net.links.insert(0, Link::new(transport.clone()));
+        let mut previous = net.idx;
+        // A real stable graph with a connected chain: neighbour degree stays two.
+        for id in 0..NATIVE_TOPOLOGY_NODES - 1 {
+            let node_zid = if id == 0 { b.zid().into() } else { zid(id) };
+            let idx = net.add_node(Node {
+                zid: node_zid,
+                whatami: Some(WhatAmI::Router),
+                locators: None,
+                sn: 1,
+                links: HashMap::new(),
+                is_gateway: false,
+            });
+            let previous_zid = net.graph[previous].zid;
+            net.graph[previous]
+                .links
+                .insert(node_zid, LinkEdgeWeight::default());
+            net.graph[idx]
+                .links
+                .insert(previous_zid, LinkEdgeWeight::default());
+            net.graph.add_edge(previous, idx, 1.0);
+            previous = idx;
+        }
+        assert_eq!(net.graph.node_count(), NATIVE_TOPOLOGY_NODES);
+        let peer: ZenohIdProto = b.zid().into();
+        assert!(!net.can_admit_native_link(zid(9999)));
+        assert!(net.can_admit_native_link(peer));
+        let link = net.links.get_mut(0).unwrap();
+        link.set_zid_mapping(0, peer);
+        link.set_local_psid_mapping(0, 1);
+        let old_maps = link.mappings.clone();
+        let old_local = link.local_mappings.clone();
+        let old_graph = net
+            .graph
+            .node_weights()
+            .map(|n| (n.zid, n.sn, n.locators.clone(), n.links.clone()))
+            .collect::<Vec<_>>();
+        let mut prefix = state(0, peer, 50);
+        prefix.locators = Some(vec!["tcp/127.0.0.1:1".parse().unwrap()]);
+        net.link_states(vec![prefix, state(65535, zid(9999), 1)], peer, true);
+        assert_eq!(net.links[0].mappings, old_maps);
+        assert_eq!(net.links[0].local_mappings, old_local);
+        assert_eq!(
+            net.graph
+                .node_weights()
+                .map(|n| (n.zid, n.sn, n.locators.clone(), n.links.clone()))
+                .collect::<Vec<_>>(),
+            old_graph
+        );
+        // Map count pressure is independent of graph node pressure.
+        for id in 0..NATIVE_TOPOLOGY_MAPPINGS {
+            net.links
+                .get_mut(0)
+                .unwrap()
+                .set_zid_mapping(id as u64, peer);
+        }
+        let old_maps = net.links[0].mappings.clone();
+        net.link_states(vec![state(65535, peer, 100)], peer, true);
+        assert_eq!(net.links[0].mappings, old_maps);
+        assert_eq!(net.graph[NodeIndex::new(1)].sn, 1);
+        net.compute_trees();
+        assert_eq!(net.trees.len(), NATIVE_TOPOLOGY_NODES);
+        assert!(net
+            .trees
+            .iter()
+            .all(|t| t.directions.len() == NATIVE_TOPOLOGY_NODES));
+        for id in 1..NATIVE_TOPOLOGY_LINKS {
+            net.links.insert(id, Link::new(transport.clone()));
+        }
+        assert!(!net.can_admit_native_link(peer));
+        net.remove_link(&peer);
+        assert!(net.links.is_empty());
+        assert_eq!(net.graph.node_count(), 1);
+        net.compute_trees();
+        assert_eq!(net.trees.len(), 1);
+        assert_eq!(net.trees[0].directions.len(), 1);
+        assert!(net.can_admit_native_link(peer));
+        drop(net);
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_wire_topology_does_not_break_sparse_ids_or_real_router_queries() {
+        use crate::net::routing::hat::router::Hat;
+        use zenoh_buffers::{reader::HasReader, writer::HasWriter};
+        use zenoh_codec::{WCodec, Zenoh080};
+        use zenoh_protocol::core::Region;
+        let (a, b, _) = pair().await;
+        let peer: ZenohIdProto = b.zid().into();
+        let gateway = a.router();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready = {
+                    let tables = gateway.tables.tables.read().unwrap();
+                    let net = tables.hats[Region::North]
+                        .as_any()
+                        .downcast_ref::<Hat>()
+                        .unwrap()
+                        .net();
+                    net.get_link_from_zid(&peer)
+                        .is_some_and(|link| link.get_zid(&1) == Some(&a.zid().into()))
+                };
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let transport = b
+            .manager()
+            .get_transport_unicast(&a.zid().into())
+            .await
+            .unwrap();
+        let send = |buf: ZBuf| {
+            let mut message: NetworkMessage = NetworkBody::OAM(Oam {
+                id: OAM_LINKSTATE,
+                body: ZExtBody::ZBuf(buf),
+                ext_qos: oam::ext::QoSType::OAM,
+                ext_tstamp: None,
+            })
+            .into();
+            assert!(transport.schedule(message.as_mut()).unwrap());
+        };
+        // Exercise the native OAM body cap before the ordered valid-state fence.
+        send(vec![0u8; super::super::linkstate::NATIVE_TOPOLOGY_FRAME_BYTES + 1].into());
+        let mut malformed = ZBuf::empty();
+        Zenoh080::new()
+            .write(&mut malformed.writer(), usize::MAX)
+            .unwrap();
+        send(malformed);
+        let mut valid = state(u16::MAX as u64, peer, 40);
+        valid.links = vec![1];
+        let mut buf = ZBuf::empty();
+        Zenoh080Routing::new()
+            .write(
+                &mut buf.writer(),
+                &LinkStateList {
+                    link_states: vec![valid],
+                },
+            )
+            .unwrap();
+        // Sanity: this is ordinary official wire encoding.
+        let _: LinkStateList =
+            zenoh_codec::RCodec::read(Zenoh080Routing::new(), &mut buf.reader()).unwrap();
+        send(buf);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready = {
+                    let tables = gateway.tables.tables.read().unwrap();
+                    let net = tables.hats[Region::North]
+                        .as_any()
+                        .downcast_ref::<Hat>()
+                        .unwrap()
+                        .net();
+                    let link = net.get_link_from_zid(&peer).unwrap();
+                    assert!(link.mappings.len() <= 3);
+                    link.get_zid(&(u16::MAX as u64)) == Some(&peer)
+                };
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let platform = crate::session::init(a.clone().into()).await.unwrap();
+        let remote = crate::session::init(b.clone().into()).await.unwrap();
+        let handler = platform
+            .declare_queryable("native-topology/live")
+            .await
+            .unwrap();
+        let querier = remote
+            .declare_querier("native-topology/live")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !querier.matching_status().await.unwrap().matching() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let replies = querier.get().await.unwrap();
+        let query = tokio::time::timeout(Duration::from_secs(5), handler.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        query
+            .reply("native-topology/live", "still-running")
+            .await
+            .unwrap();
+        drop(query);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
+                .await
+                .unwrap()
+                .unwrap()
+                .result()
+                .is_ok()
+        );
+        remote.close().await.unwrap();
+        platform.close().await.unwrap();
+        drop((handler, querier));
+        b.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reclaimed = {
+                    let tables = gateway.tables.tables.read().unwrap();
+                    let net = tables.hats[Region::North]
+                        .as_any()
+                        .downcast_ref::<Hat>()
+                        .unwrap()
+                        .net();
+                    net.links.is_empty() && net.graph.node_count() == 1
+                };
+                if reclaimed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        a.close().await.unwrap();
     }
 }

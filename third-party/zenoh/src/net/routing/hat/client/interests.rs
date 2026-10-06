@@ -13,7 +13,7 @@
 //
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
 };
 
 use zenoh_protocol::network::{
@@ -26,7 +26,6 @@ use zenoh_sync::get_mut_unchecked;
 use super::Hat;
 use crate::net::routing::{
     dispatcher::{
-        face::InterestState,
         interests::{
             CurrentInterest, CurrentInterestCleanup, PendingCurrentInterest, RemoteInterest,
         },
@@ -52,14 +51,26 @@ impl Hat {
             .values()
             .flat_map(|hat| hat.remote_interests(ctx.tables))
         {
-            let id = self
-                .face_hat(ctx.src_face)
-                .next_id
-                .fetch_add(1, Ordering::SeqCst);
+            // Repropagation retains a future projection only; upstream creates no
+            // pending Current correlation even though the wire mode is CurrentFuture.
+            let Some(prepared) = ctx.src_face.prepare_interest_for(
+                InterestMode::Future,
+                false,
+                res.as_ref(),
+                options,
+            ) else {
+                continue;
+            };
+            let Some(id) = ctx
+                .src_face
+                .new_interest_id(&self.face_hat(ctx.src_face).next_id)
+            else {
+                continue;
+            };
             let face_id = ctx.src_face.id;
             get_mut_unchecked(ctx.src_face)
                 .local_interests
-                .insert(id, InterestState::new(face_id, options, res.clone(), false));
+                .insert(id, prepared.state(face_id, options, res.clone(), false));
             let wire_expr = res
                 .as_ref()
                 .map(|res| Resource::decl_key(res, ctx.src_face));
@@ -107,17 +118,32 @@ impl HatInterestTrait for Hat {
         let interests_timeout = ctx.tables.interests_timeout;
 
         if let Some(mut dst_face) = self.owned_faces(ctx.tables).next().cloned() {
-            let id = self
-                .face_hat(&dst_face)
-                .next_id
-                .fetch_add(1, Ordering::SeqCst);
+            #[allow(unused_mut)]
+            let Some(mut prepared) =
+                dst_face.prepare_interest_for(msg.mode, false, res.as_ref(), msg.options)
+            else {
+                return if msg.mode.is_current() {
+                    ResolvedCurrentInterest
+                } else {
+                    Noop
+                };
+            };
+            let Some(id) = dst_face.new_interest_id(&self.face_hat(&dst_face).next_id) else {
+                return if msg.mode.is_current() {
+                    ResolvedCurrentInterest
+                } else {
+                    Noop
+                };
+            };
+            #[cfg(feature = "zenss-route-gate")]
+            let native_reservation = prepared.pending.take();
 
             if msg.mode.is_future() {
                 let dst_face_id = dst_face.id;
                 let is_finalized = msg.mode == InterestMode::Future;
                 get_mut_unchecked(&mut dst_face).local_interests.insert(
                     id,
-                    InterestState::new(dst_face_id, msg.options, res.clone(), is_finalized),
+                    prepared.state(dst_face_id, msg.options, res.clone(), is_finalized),
                 );
             }
 
@@ -131,6 +157,8 @@ impl HatInterestTrait for Hat {
                         interest: interest.clone(),
                         cancellation_token,
                         rejection_token,
+                        #[cfg(feature = "zenss-route-gate")]
+                        native_reservation,
                     },
                 );
                 CurrentInterestCleanup::spawn_interest_clean_up_task(
@@ -330,6 +358,9 @@ impl HatInterestTrait for Hat {
         _ctx: DispatcherContext,
         _msg: &Interest,
         _res: Option<Arc<Resource>>,
+        _prepared: Option<
+            crate::net::routing::dispatcher::local_resources::NativeHatInsert<InterestId>,
+        >,
     ) {
         unreachable!("south-bound client hat")
     }

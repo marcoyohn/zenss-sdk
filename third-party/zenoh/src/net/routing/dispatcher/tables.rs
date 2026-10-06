@@ -130,6 +130,15 @@ pub(crate) struct TablesData {
     pub(crate) interests_timeout: Duration,
 
     pub(crate) root_res: Arc<Resource>,
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) native_hat_budget: Arc<super::local_resources::NativeHatBudget>,
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) native_interest_budget: Arc<super::interests::NativeInterestBudget>,
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) native_aggregation_budget:
+        Option<Arc<super::local_resources::NativeAggregationBudget>>,
+    #[cfg(feature = "zenss-route-gate")]
+    pub(crate) native_resource_budget: Option<Arc<super::resource::NativeResourceBudget>>,
 
     pub(crate) face_counter: FaceId,
 
@@ -202,6 +211,14 @@ impl TablesData {
             queries_default_timeout,
             interests_timeout,
             root_res: Resource::root(),
+            #[cfg(feature = "zenss-route-gate")]
+            native_resource_budget: None,
+            #[cfg(feature = "zenss-route-gate")]
+            native_aggregation_budget: None,
+            #[cfg(feature = "zenss-route-gate")]
+            native_hat_budget: Arc::new(super::local_resources::NativeHatBudget::default()),
+            #[cfg(feature = "zenss-route-gate")]
+            native_interest_budget: Arc::new(super::interests::NativeInterestBudget::default()),
             interceptors: interceptor_factories(config)?,
             #[cfg(feature = "zenss-route-gate")]
             route_gate: None,
@@ -537,16 +554,16 @@ impl TablesLock {
                 config.stats.filters().iter().map(|k| &*k.key),
             );
         }
-        tables.data.interceptors = interceptor_factories(config)?;
+        let factories = interceptor_factories(config)?;
         #[cfg(feature = "zenss-route-gate")]
-        if let Some(gate) = tables.data.route_gate.clone() {
-            tables.data.interceptors.insert(
-                0,
-                Box::new(super::super::interceptor::route_gate::GateFactory::new(
-                    gate,
-                )),
-            );
+        let mut factories = factories;
+        #[cfg(feature = "zenss-route-gate")]
+        if tables.data.route_gate.is_some() {
+            // The installed gate is always first. Keep its factory and live-face accounting;
+            // replacing it would forget IDs while the native maps remain populated.
+            factories.insert(0, tables.data.interceptors.remove(0));
         }
+        tables.data.interceptors = factories;
         drop(tables);
         let tables = zread!(self.tables);
         let version = tables

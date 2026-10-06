@@ -1,11 +1,11 @@
 # Generated public-only workspace; edit the ZenSS source repository.
 [workspace]
 resolver = "2"
-exclude = ["third-party/zenoh"]
+exclude = ["third-party/zenoh", "third-party/zenoh-transport"]
 members = ["contracts/zenss-contracts", "crates/zenss-plugin-trait", "sdk/rust/zenss-client-sdk", "examples/product-echo", "examples/outbound-client"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.94.1"
 authors = ["ZenSS Team"]
@@ -27,6 +27,6 @@ license = "Apache-2.0"
 "zenoh-plugin-trait" = { "version" = "=1.10.1" }
 "zenoh-result" = { "version" = "=1.10.1" }
 "zenoh-util" = { "version" = "=1.10.1" }
-"zenss-client-sdk" = { "path" = "sdk/rust/zenss-client-sdk", "version" = "0.2.0" }
-"zenss-contracts" = { "path" = "contracts/zenss-contracts", "version" = "0.2.0" }
+"zenss-client-sdk" = { "path" = "sdk/rust/zenss-client-sdk", "version" = "0.3.0" }
+"zenss-contracts" = { "path" = "contracts/zenss-contracts", "version" = "0.3.0" }
 "zenss-plugin-trait" = { "path" = "crates/zenss-plugin-trait" }

@@ -95,6 +95,10 @@ where
         let codec = Zenoh080::new();
         let options: u64 = codec.read(&mut *reader)?;
         let psid: u64 = codec.read(&mut *reader)?;
+        #[cfg(feature = "zenss-route-gate")]
+        if self.native_limits && psid > linkstate::NATIVE_TOPOLOGY_PSID {
+            return Err(DidntRead);
+        }
         let sn: u64 = codec.read(&mut *reader)?;
         let zid = if imsg::has_option(options, linkstate::PID) {
             let zid: ZenohIdProto = codec.read(&mut *reader)?;
@@ -109,15 +113,38 @@ where
             None
         };
         let locators = if imsg::has_option(options, linkstate::LOC) {
+            #[cfg(feature = "zenss-route-gate")]
+            let locs: Vec<Locator> = if self.native_limits {
+                let len: usize = codec.read(&mut *reader)?;
+                if len > linkstate::NATIVE_TOPOLOGY_LOCATORS {
+                    return Err(DidntRead);
+                }
+                let mut locators = Vec::with_capacity(len);
+                for _ in 0..len {
+                    locators.push(codec.read(&mut *reader)?);
+                }
+                locators
+            } else {
+                codec.read(&mut *reader)?
+            };
+            #[cfg(not(feature = "zenss-route-gate"))]
             let locs: Vec<Locator> = codec.read(&mut *reader)?;
             Some(locs)
         } else {
             None
         };
         let links_len: usize = codec.read(&mut *reader)?;
+        #[cfg(feature = "zenss-route-gate")]
+        if self.native_limits && links_len > linkstate::NATIVE_TOPOLOGY_LINKS {
+            return Err(DidntRead);
+        }
         let mut links: Vec<u64> = Vec::with_capacity(links_len);
         for _ in 0..links_len {
             let l: u64 = codec.read(&mut *reader)?;
+            #[cfg(feature = "zenss-route-gate")]
+            if self.native_limits && l > linkstate::NATIVE_TOPOLOGY_PSID {
+                return Err(DidntRead);
+            }
             links.push(l);
         }
 
@@ -177,6 +204,10 @@ where
         let codec = Zenoh080::new();
 
         let len: usize = codec.read(&mut *reader)?;
+        #[cfg(feature = "zenss-route-gate")]
+        if self.native_limits && len > linkstate::NATIVE_TOPOLOGY_NODES {
+            return Err(DidntRead);
+        }
         let mut link_states = Vec::with_capacity(len);
         for _ in 0..len {
             let ls: LinkState = self.read(&mut *reader)?;
@@ -184,5 +215,67 @@ where
         }
 
         Ok(LinkStateList { link_states })
+    }
+}
+
+#[cfg(all(test, feature = "zenss-route-gate"))]
+mod native_topology_tests {
+    use super::*;
+    use zenoh_buffers::{reader::HasReader, writer::HasWriter, ZBuf};
+
+    fn frame(words: &[usize]) -> ZBuf {
+        let mut buf = ZBuf::empty();
+        for word in words {
+            Zenoh080::new().write(&mut buf.writer(), *word).unwrap();
+        }
+        buf
+    }
+    fn refused(buf: ZBuf) {
+        let decoded: Result<LinkStateList, _> =
+            Zenoh080Routing::native_bounded().read(&mut buf.reader());
+        assert!(decoded.is_err());
+    }
+    #[test]
+    fn declared_lengths_are_refused_before_vector_allocation() {
+        // These contain just varints, never allocate a gigantic fixture Vec.
+        refused(frame(&[usize::MAX]));
+        refused(frame(&[1, 0, 0, 1, usize::MAX])); // list/options/psid/sn/neighbours
+        refused(frame(&[1, linkstate::LOC as usize, 0, 1, usize::MAX]));
+        refused(frame(&[1, 0, usize::MAX, 1, 0]));
+        refused(frame(&[1, 0, 0, 1, 1, usize::MAX]));
+    }
+    #[test]
+    fn official_encoding_roundtrips_allowed_ids_and_ungated_counts() {
+        let states = vec![LinkState {
+            psid: linkstate::NATIVE_TOPOLOGY_PSID,
+            sn: 1,
+            zid: None,
+            whatami: Some(WhatAmI::Router),
+            locators: None,
+            links: vec![0, linkstate::NATIVE_TOPOLOGY_PSID],
+            link_weights: Some(vec![1, 2]),
+            is_gateway: false,
+        }];
+        let mut buf = ZBuf::empty();
+        let input = LinkStateList {
+            link_states: states,
+        };
+        Zenoh080Routing::new()
+            .write(&mut buf.writer(), &input)
+            .unwrap();
+        let decoded: LinkStateList = Zenoh080Routing::native_bounded()
+            .read(&mut buf.reader())
+            .unwrap();
+        assert_eq!(input, decoded);
+        let many = LinkStateList {
+            link_states: vec![input.link_states[0].clone(); linkstate::NATIVE_TOPOLOGY_NODES + 1],
+        };
+        let mut buf = ZBuf::empty();
+        Zenoh080Routing::new()
+            .write(&mut buf.writer(), &many)
+            .unwrap();
+        let decoded: LinkStateList = Zenoh080Routing::new().read(&mut buf.reader()).unwrap();
+        assert_eq!(decoded, many);
+        refused(buf);
     }
 }

@@ -19,7 +19,6 @@
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
 use std::{
     any::Any,
-    collections::HashMap,
     fmt::Debug,
     sync::{atomic::AtomicU32, Arc},
 };
@@ -122,8 +121,8 @@ impl HatBaseTrait for Hat {
         Ok(())
     }
 
-    fn new_face(&self) -> Box<dyn Any + Send + Sync> {
-        Box::new(HatFace::new())
+    fn new_face(&self, _tables: &TablesData) -> Box<dyn Any + Send + Sync> {
+        Box::new(HatFace::new(_tables))
     }
 
     fn new_resource(&self) -> Box<dyn Any + Send + Sync> {
@@ -245,28 +244,30 @@ impl HatContext {
     }
 }
 
+use crate::net::routing::dispatcher::local_resources::{NativeHatKind, NativeHatMap};
+
 struct HatFace {
     next_id: AtomicU32, // @TODO: manage rollover and uniqueness
-    remote_interests: HashMap<InterestId, RemoteInterest>,
-    local_subs: HashMap<Arc<Resource>, SubscriberId>,
-    remote_subs: HashMap<SubscriberId, Arc<Resource>>,
-    local_qabls: HashMap<Arc<Resource>, (QueryableId, QueryableInfoType)>,
-    remote_qabls: HashMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
-    local_tokens: HashMap<Arc<Resource>, TokenId>,
-    remote_tokens: HashMap<TokenId, Arc<Resource>>,
+    remote_interests: NativeHatMap<InterestId, RemoteInterest>,
+    local_subs: NativeHatMap<Arc<Resource>, SubscriberId>,
+    remote_subs: NativeHatMap<SubscriberId, Arc<Resource>>,
+    local_qabls: NativeHatMap<Arc<Resource>, (QueryableId, QueryableInfoType)>,
+    remote_qabls: NativeHatMap<QueryableId, (Arc<Resource>, QueryableInfoType)>,
+    local_tokens: NativeHatMap<Arc<Resource>, TokenId>,
+    remote_tokens: NativeHatMap<TokenId, Arc<Resource>>,
 }
 
 impl HatFace {
-    fn new() -> Self {
+    fn new(_tables: &TablesData) -> Self {
         Self {
             next_id: AtomicU32::new(1),
-            remote_interests: HashMap::new(),
-            local_subs: HashMap::new(),
-            remote_subs: HashMap::new(),
-            local_qabls: HashMap::new(),
-            remote_qabls: HashMap::new(),
-            local_tokens: HashMap::new(),
-            remote_tokens: HashMap::new(),
+            remote_interests: NativeHatMap::new(_tables, NativeHatKind::Interest),
+            local_subs: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            remote_subs: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            local_qabls: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            remote_qabls: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            local_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
+            remote_tokens: NativeHatMap::new(_tables, NativeHatKind::Entity),
         }
     }
 }
@@ -324,5 +325,190 @@ impl HatTrait for Hat {
             removed_queryables,
             removed_tokens,
         }
+    }
+}
+
+#[cfg(all(test, feature = "zenss-route-gate"))]
+mod native_hat_admission_tests {
+    use super::*;
+    use crate::net::{
+        routing::{
+            dispatcher::pubsub::SubscriberInfo,
+            hat::{HatPubSubTrait, HatQueriesTrait, HatTokenTrait},
+            interceptor::route_gate::{RouteGate, RouteRequest, RouteSubject},
+        },
+        runtime::RuntimeBuilder,
+    };
+    use std::sync::atomic::Ordering;
+    struct Allow;
+    impl RouteGate for Allow {
+        fn authorize(&self, _: &RouteSubject, _: &RouteRequest<'_>) -> bool {
+            true
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upstream_simple_map_refusal_precedes_id_info_and_wire_mutation() {
+        let cfg=crate::Config::from_json5(r#"{mode:"router",listen:{endpoints:["tcp/127.0.0.1:0"]},scouting:{multicast:{enabled:false}}}"#).unwrap();
+        let center = crate::open(cfg).await.unwrap();
+        let cfg=crate::Config::from_json5(&format!(r#"{{mode:"client",connect:{{endpoints:["{}"]}},scouting:{{multicast:{{enabled:false}}}}}}"#,center.runtime().get_locators()[0])).unwrap();
+        let mut runtime = RuntimeBuilder::new(cfg).build().await.unwrap();
+        runtime.install_route_gate(Arc::new(Allow)).unwrap();
+        runtime.start().await.unwrap();
+        let session = crate::session::init(runtime.clone().into()).await.unwrap();
+        let gateway = runtime.router();
+        {
+            let _ctrl = gateway.tables.ctrl_lock.lock().unwrap();
+            let mut tables = gateway.tables.tables.write().unwrap();
+            let tables = &mut *tables;
+            let mut source = tables
+                .data
+                .faces
+                .values()
+                .find(|f| f.is_local)
+                .unwrap()
+                .clone();
+            let mut dst = tables
+                .data
+                .faces
+                .values()
+                .find(|f| !f.is_local)
+                .unwrap()
+                .clone();
+
+            let mut resources = Vec::new();
+            for id in 0..1984 {
+                let mut root = tables.data.root_res.clone();
+                resources.push(
+                    Resource::make_resource(tables, &mut root, &format!("retained/{id}")).unwrap(),
+                );
+            }
+            let mut root = tables.data.root_res.clone();
+            let mut refused = Resource::make_resource(tables, &mut root, "refused/local").unwrap();
+            let hat = tables.hats[Region::North]
+                .as_any_mut()
+                .downcast_mut::<Hat>()
+                .unwrap();
+            for kind in ["subscriber", "queryable", "token"] {
+                let hf = hat.face_hat_mut(&mut dst);
+                for (id, res) in resources.iter().enumerate() {
+                    match kind {
+                        "subscriber" => {
+                            let p = hf.local_subs.prepare_insert(res.clone()).unwrap();
+                            hf.local_subs.insert_prepared(p, id as u32);
+                        }
+                        "queryable" => {
+                            let p = hf.local_qabls.prepare_insert(res.clone()).unwrap();
+                            hf.local_qabls.insert_prepared(
+                                p,
+                                (
+                                    id as u32,
+                                    QueryableInfoType {
+                                        complete: true,
+                                        distance: 0,
+                                    },
+                                ),
+                            );
+                        }
+                        _ => {
+                            let p = hf.local_tokens.prepare_insert(res.clone()).unwrap();
+                            hf.local_tokens.insert_prepared(p, id as u32);
+                        }
+                    }
+                }
+                let before = hat.face_hat(&dst).next_id.load(Ordering::SeqCst);
+                let mut emitted = 0;
+                {
+                    let mut send =
+                        |_: &Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>,
+                         _: crate::net::routing::RoutingContext<
+                            zenoh_protocol::network::Declare,
+                        >| {
+                            emitted += 1;
+                        };
+                    let ctx = DispatcherContext {
+                        tables_lock: &gateway.tables,
+                        tables: &mut tables.data,
+                        src_face: &mut source,
+                        send_declare: &mut send,
+                    };
+                    match kind {
+                        "subscriber" => {
+                            hat.propagate_subscriber(ctx, refused.clone(), Some(SubscriberInfo))
+                        }
+                        "queryable" => hat.propagate_queryable(
+                            ctx,
+                            refused.clone(),
+                            Some(QueryableInfoType {
+                                complete: true,
+                                distance: 0,
+                            }),
+                        ),
+                        _ => hat.propagate_token(ctx, refused.clone()),
+                    }
+                }
+                assert_eq!(emitted, 0);
+                assert_eq!(hat.face_hat(&dst).next_id.load(Ordering::SeqCst), before);
+                let hf = hat.face_hat_mut(&mut dst);
+                match kind {
+                    "subscriber" => {
+                        assert!(!hf.local_subs.contains_key(&refused));
+                        hf.local_subs.clear();
+                    }
+                    "queryable" => {
+                        assert!(!hf.local_qabls.contains_key(&refused));
+                        hf.local_qabls.clear();
+                    }
+                    _ => {
+                        assert!(!hf.local_tokens.contains_key(&refused));
+                        hf.local_tokens.clear();
+                    }
+                }
+                {
+                    let mut send =
+                        |_: &Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>,
+                         _: crate::net::routing::RoutingContext<
+                            zenoh_protocol::network::Declare,
+                        >| {
+                            emitted += 1;
+                        };
+                    let ctx = DispatcherContext {
+                        tables_lock: &gateway.tables,
+                        tables: &mut tables.data,
+                        src_face: &mut source,
+                        send_declare: &mut send,
+                    };
+                    match kind {
+                        "subscriber" => {
+                            hat.propagate_subscriber(ctx, refused.clone(), Some(SubscriberInfo))
+                        }
+                        "queryable" => hat.propagate_queryable(
+                            ctx,
+                            refused.clone(),
+                            Some(QueryableInfoType {
+                                complete: true,
+                                distance: 0,
+                            }),
+                        ),
+                        _ => hat.propagate_token(ctx, refused.clone()),
+                    }
+                }
+                assert_eq!(emitted, 1);
+                assert_eq!(
+                    hat.face_hat(&dst).next_id.load(Ordering::SeqCst),
+                    before + 1
+                );
+                let hf = hat.face_hat_mut(&mut dst);
+                hf.local_subs.clear();
+                hf.local_qabls.clear();
+                hf.local_tokens.clear();
+            }
+            for mut res in resources {
+                Resource::clean(&mut res);
+            }
+            Resource::clean(&mut refused);
+        }
+        session.close().await.unwrap();
+        runtime.close().await.unwrap();
+        center.close().await.unwrap();
     }
 }

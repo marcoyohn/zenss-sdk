@@ -14,10 +14,25 @@
 pub(crate) mod linkstate;
 
 #[derive(Clone, Copy)]
-pub struct Zenoh080Routing;
+pub struct Zenoh080Routing {
+    #[cfg(feature = "zenss-route-gate")]
+    native_limits: bool,
+}
 
 impl Zenoh080Routing {
     pub const fn new() -> Self {
-        Self
+        Self {
+            #[cfg(feature = "zenss-route-gate")]
+            native_limits: false,
+        }
+    }
+}
+
+#[cfg(feature = "zenss-route-gate")]
+impl Zenoh080Routing {
+    pub(crate) const fn native_bounded() -> Self {
+        Self {
+            native_limits: true,
+        }
     }
 }

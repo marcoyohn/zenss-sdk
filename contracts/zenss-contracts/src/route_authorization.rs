@@ -33,7 +33,7 @@ pub struct RoutePermission {
     #[serde(default)]
     pub during_drain: bool,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteLease {
     pub issuer: String,
@@ -81,7 +81,16 @@ pub struct AuthenticatedQueryContext {
     pub principal: RoutePrincipal,
     pub message_public_key: Option<String>,
 }
+/// One-use, direct pinned Router provenance. This carries no SDK principal,
+/// CSR, business grant or retained-report identity. Product checks remain mandatory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedPlatformQueryContext {
+    pub source_router: String,
+    pub issuer: String,
+    pub expires_unix_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RouteAuthorizationCommand {
     Grant {
@@ -99,4 +108,43 @@ pub enum RouteAuthorizationCommand {
     Drain {
         issuer: String,
     },
+}
+
+/// Privileged native capacity policy. It grants no network route or business permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryControlRule {
+    pub key: String,
+    /// Exact top-level JSON `kind` values accepted for reserved capacity.
+    pub kinds: Vec<String>,
+    pub max_payload_bytes: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryControlPolicyCommand {
+    /// Must be `install_query_control_policy`; never a remote Query operation.
+    pub operation: String,
+    pub issuer: String,
+    /// Atomically replaces this issuer's bounded policy; an empty list removes it.
+    pub rules: Vec<QueryControlRule>,
+    /// Fail closed on Hosts predating atomic grant-bound capacity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_grant_bound_capacity: bool,
+}
+
+/// Trusted capacity attached to one actual Grant; keys come from its permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryGrantControlPolicy {
+    pub flow: RouteFlow,
+    pub kinds: Vec<String>,
+    pub max_payload_bytes: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlledRouteGrantCommand {
+    /// Must be `install_controlled_route_grant`; never a remote Query operation.
+    pub operation: String,
+    pub lease: Box<RouteLease>,
+    pub capacity: QueryGrantControlPolicy,
 }

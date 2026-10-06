@@ -53,6 +53,8 @@ use crate::net::routing::{
 };
 #[derive(Clone)]
 pub(crate) struct Query {
+    #[cfg(feature = "zenss-route-gate")]
+    capacity: super::super::interceptor::route_gate::QueryCapacity,
     src_face: Arc<FaceState>,
     src_qid: RequestId,
     src_qos: response::ext::QoSType,
@@ -88,13 +90,16 @@ impl Face {
                 send_declare,
             };
 
-            tables.hats[region].register_queryable(
+            if !tables.hats[region].register_queryable(
                 ctx.reborrow(),
                 id,
                 res.clone(),
                 node_id,
                 qabl_info,
-            );
+            ) {
+                Resource::clean(&mut res);
+                return;
+            }
 
             tables.hats[region].disable_query_routes(&mut res);
 
@@ -201,6 +206,14 @@ impl Face {
 
     pub fn route_query(&self, msg: &mut Request) {
         let rtables = zread!(self.tables.tables);
+        #[cfg(feature = "zenss-route-gate")]
+        if rtables.data.route_gate.is_some() {
+            msg.ext_timeout = Some(
+                msg.ext_timeout
+                    .unwrap_or(rtables.data.queries_default_timeout)
+                    .min(Duration::from_secs(60)),
+            );
+        }
         match rtables
             .data
             .get_mapping(&self.state, &msg.wire_expr.scope, msg.wire_expr.mapping)
@@ -226,13 +239,64 @@ impl Face {
 
                 let queries_lock = zwrite!(self.tables.queries_lock);
 
+                #[cfg(feature = "zenss-route-gate")]
+                let capacity = {
+                    use super::super::interceptor::route_gate::{
+                        QueryCapacity, QueryCapacitySource, RouteAction, RouteFlow, RouteRequest,
+                    };
+                    use zenoh_buffers::buffer::Buffer;
+                    let mut capacity = QueryCapacity::Business;
+                    if let Some(gate) = &rtables.data.route_gate {
+                        // Bound the classification input before copying a fragmented payload.
+                        let zenoh_protocol::zenoh::RequestBody::Query(body) = &msg.payload;
+                        // Only the body is copied here. Reserved origin attachments
+                        // are independently bounded and authenticated by the gate.
+                        if body.ext_body.as_ref().map_or(0, |b| b.payload.len())
+                            <= 4 * 1024 * 1024 + 32 * 1024
+                        {
+                            let bytes = body
+                                .ext_body
+                                .as_ref()
+                                .map(|b| crate::bytes::ZBytes::from(b.payload.clone()));
+                            let bytes = bytes.as_ref().map(|b| b.to_bytes());
+                            let key = expr.key_expr().map(|key| key.as_str()).unwrap_or("");
+                            capacity =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    gate.query_capacity(
+                                        &RouteRequest {
+                                            action: RouteAction::Query,
+                                            flow: RouteFlow::Ingress,
+                                            key: Some(key),
+                                            payload: bytes.as_deref(),
+                                        },
+                                        if self.state.is_local {
+                                            QueryCapacitySource::Local
+                                        } else {
+                                            QueryCapacitySource::Routed
+                                        },
+                                    )
+                                }))
+                                .unwrap_or(QueryCapacity::Business);
+                        }
+                    }
+                    capacity
+                };
                 let query = Arc::new(Query {
+                    #[cfg(feature = "zenss-route-gate")]
+                    capacity,
                     src_face: self.state.clone(),
                     src_qid: msg.id,
                     src_qos: msg.ext_qos,
                 });
 
                 let src_face = &self.state;
+                let pending_limit = usize::MAX;
+                #[cfg(feature = "zenss-route-gate")]
+                let pending_limit = if rtables.data.route_gate.is_some() {
+                    1024
+                } else {
+                    pending_limit
+                };
 
                 if !rtables.ingress_filter(src_face) {
                     return;
@@ -260,7 +324,14 @@ impl Face {
                         }
                     };
 
-                    self.compute_final_route(msg.ext_target, &mut builder, &query, &qabls, filter);
+                    self.compute_final_route(
+                        msg.ext_target,
+                        &mut builder,
+                        &query,
+                        &qabls,
+                        filter,
+                        pending_limit,
+                    );
                 }
 
                 // NOTE: it's important to drop the `Arc<Query>` object immediately otherwise
@@ -341,6 +412,8 @@ impl Face {
                         if dir.dst_face.primitives.send_request(msg) {
                             #[cfg(feature = "stats")]
                             payload_observer.observe_payload(zenoh_stats::Tx, &dir.dst_face, msg);
+                        } else if pending_limit != usize::MAX && !dir.dst_face.is_local {
+                            route_send_response_final(&self.tables, &mut dir.dst_face.clone(), rid);
                         }
                     }
                 }
@@ -373,15 +446,17 @@ impl Face {
         query: &Arc<Query>,
         qabls: &Arc<QueryTargetQablSet>,
         filter: impl Fn(&QueryTargetQabl) -> bool,
+        pending_limit: usize,
     ) {
         match target {
             QueryTarget::All => {
                 for qabl in qabls.iter().filter(|q| filter(q)) {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid =
+                            insert_pending_query(&mut dir.dst_face, query.clone(), pending_limit)?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "all");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 }
             }
@@ -390,11 +465,12 @@ impl Face {
                     .iter()
                     .filter(|q| q.info.is_none_or(|info| info.complete) && filter(q))
                 {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid =
+                            insert_pending_query(&mut dir.dst_face, query.clone(), pending_limit)?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "all-complete");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 }
             }
@@ -403,14 +479,22 @@ impl Face {
                     .iter()
                     .find(|q| q.info.is_some_and(|info| info.complete) && filter(q))
                 {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid =
+                            insert_pending_query(&mut dir.dst_face, query.clone(), pending_limit)?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "best-matching");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 } else {
-                    self.compute_final_route(QueryTarget::All, route, query, qabls, filter)
+                    self.compute_final_route(
+                        QueryTarget::All,
+                        route,
+                        query,
+                        qabls,
+                        filter,
+                        pending_limit,
+                    )
                 }
             }
         }
@@ -418,7 +502,35 @@ impl Face {
 }
 
 #[inline]
-fn insert_pending_query(outface: &mut Arc<FaceState>, query: Arc<Query>) -> RequestId {
+fn insert_pending_query(
+    outface: &mut Arc<FaceState>,
+    query: Arc<Query>,
+    limit: usize,
+) -> Option<RequestId> {
+    // Caller holds both tables read lock and queries write lock; never reacquire tables here.
+    // Configured gated faces cannot accumulate more than this many routed queries, including
+    // local/native senders and requests subsequently denied by the egress interceptor.
+    let full = outface.pending_queries.len() >= limit;
+    #[cfg(feature = "zenss-route-gate")]
+    let full = if limit != usize::MAX {
+        use super::super::interceptor::route_gate::QueryCapacity;
+        let class_limit = if query.capacity == QueryCapacity::Control {
+            64
+        } else {
+            limit
+        };
+        outface
+            .pending_queries
+            .values()
+            .filter(|(q, _)| q.capacity == query.capacity)
+            .count()
+            >= class_limit
+    } else {
+        full
+    };
+    if full {
+        return None;
+    }
     let outface_mut = get_mut_unchecked(outface);
     // This `wrapping_add` is kind of "safe" because it would require an incredible amount
     // of parallel running queries to conflict a currently used id.
@@ -430,7 +542,7 @@ fn insert_pending_query(outface: &mut Arc<FaceState>, query: Arc<Query>) -> Requ
         qid,
         (query, outface_mut.task_controller.get_cancellation_token()),
     );
-    qid
+    Some(qid)
 }
 
 #[derive(Clone)]
@@ -544,6 +656,8 @@ fn get_query_route(
             &src_face.region,
             node_id,
             compute_route,
+            #[cfg(feature = "zenss-route-gate")]
+            tables.data.native_resource_budget.as_ref(),
         );
     }
     compute_route()

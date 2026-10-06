@@ -229,7 +229,9 @@ impl Gateway {
                 Region::Local,
                 Bound::North,
                 primitives.clone(),
-                tables.hats.map_ref(|hat| hat.new_face()),
+                tables.hats.map_ref(|hat| hat.new_face(&tables.data)),
+                #[cfg(feature = "zenss-route-gate")]
+                tables.data.native_interest_budget.clone(),
             )
             .whatami(WhatAmI::Client)
             .local(true)
@@ -282,6 +284,9 @@ impl Gateway {
         #[cfg(feature = "stats")]
         let stats = transport.get_stats().ok();
 
+        #[cfg(feature = "zenss-route-gate")]
+        let native_interest_budget = tables.data.native_interest_budget.clone();
+        let face_hats = tables.hats.map_ref(|hat| hat.new_face(&tables.data));
         let newface = tables
             .data
             .faces
@@ -293,7 +298,9 @@ impl Gateway {
                     region,
                     remote_bound,
                     mux.clone(),
-                    tables.hats.map_ref(|hat| hat.new_face()),
+                    face_hats,
+                    #[cfg(feature = "zenss-route-gate")]
+                    native_interest_budget,
                 )
                 .whatami(whatami)
                 .ingress_interceptors(ingress.clone());
@@ -375,7 +382,9 @@ impl Gateway {
             region,
             Bound::default(), // HACK(regions): this is a placeholder
             mux.clone(),
-            tables.hats.map_ref(|hat| hat.new_face()),
+            tables.hats.map_ref(|hat| hat.new_face(&tables.data)),
+            #[cfg(feature = "zenss-route-gate")]
+            tables.data.native_interest_budget.clone(),
         )
         .multicast_group(transport);
 
@@ -430,7 +439,9 @@ impl Gateway {
             region,
             remote_bound,
             Arc::new(DummyPrimitives),
-            tables.hats.map_ref(|hat| hat.new_face()),
+            tables.hats.map_ref(|hat| hat.new_face(&tables.data)),
+            #[cfg(feature = "zenss-route-gate")]
+            tables.data.native_interest_budget.clone(),
         )
         .multicast_group(transport)
         .ingress_interceptors(interceptor.clone());

@@ -72,13 +72,26 @@ impl Hat {
                 .values()
                 .any(|i| i.options.tokens() && i.matches(res))
         {
+            let Some(prepared) = self
+                .face_hat(dst_face)
+                .local_tokens
+                .prepare_insert_declaration(
+                    res.clone(),
+                    &res,
+                    dst_face,
+                    crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Token,
+                    false,
+                )
+            else {
+                return;
+            };
             let id = self
                 .face_hat(dst_face)
                 .next_id
                 .fetch_add(1, Ordering::SeqCst);
             self.face_hat_mut(dst_face)
                 .local_tokens
-                .insert(res.clone(), id);
+                .insert_prepared(prepared, id);
             let key_expr = Resource::decl_key(res, dst_face);
             tracing::debug!(dst = %dst_face);
             send_declare(
@@ -178,8 +191,21 @@ impl HatTokenTrait for Hat {
         id: TokenId,
         mut res: Arc<Resource>,
         _nid: NodeId,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
+        let Some(prepared) = self
+            .face_hat(ctx.src_face)
+            .remote_tokens
+            .prepare_insert_declaration(
+                id,
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Token,
+                true,
+            )
+        else {
+            return false;
+        };
 
         {
             let res = get_mut_unchecked(&mut res);
@@ -201,7 +227,8 @@ impl HatTokenTrait for Hat {
 
         self.face_hat_mut(ctx.src_face)
             .remote_tokens
-            .insert(id, res.clone());
+            .insert_prepared(prepared, res.clone());
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx), ret)]

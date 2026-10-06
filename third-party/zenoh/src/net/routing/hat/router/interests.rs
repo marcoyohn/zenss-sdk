@@ -135,12 +135,15 @@ impl HatInterestTrait for Hat {
     #[tracing::instrument(level = "debug", skip(_ctx, _dst), ret)]
     fn send_declare_final(&mut self, _ctx: DispatcherContext, _id: InterestId, _dst: &Remote) {}
 
-    #[tracing::instrument(level = "debug", skip(ctx, _msg), ret)]
+    #[tracing::instrument(level = "debug", skip_all)]
     fn register_interest(
         &mut self,
         ctx: DispatcherContext,
         _msg: &Interest,
         _res: Option<Arc<Resource>>,
+        _prepared: Option<
+            crate::net::routing::dispatcher::local_resources::NativeHatInsert<InterestId>,
+        >,
     ) {
         debug_assert!(self.owns(ctx.src_face));
         debug_assert!(self.region().bound().is_south());

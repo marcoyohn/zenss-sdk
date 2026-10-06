@@ -30,7 +30,6 @@ use zenoh_sync::get_mut_unchecked;
 use super::{initial_interest, Hat, INITIAL_INTEREST_ID};
 use crate::net::routing::{
     dispatcher::{
-        face::InterestState,
         interests::{
             CurrentInterest, CurrentInterestCleanup, PendingCurrentInterest, RemoteInterest,
         },
@@ -63,14 +62,26 @@ impl Hat {
             .filter(|hat| hat.region().bound().is_south())
             .flat_map(|hat| hat.remote_interests(ctx.tables))
         {
-            let id = self
-                .face_hat(ctx.src_face)
-                .next_id
-                .fetch_add(1, Ordering::SeqCst);
+            // Repropagation retains a future projection only; upstream creates no
+            // pending Current correlation even though the wire mode is CurrentFuture.
+            let Some(prepared) = ctx.src_face.prepare_interest_for(
+                InterestMode::Future,
+                false,
+                res.as_ref(),
+                options,
+            ) else {
+                continue;
+            };
+            let Some(id) = ctx
+                .src_face
+                .new_interest_id(&self.face_hat(ctx.src_face).next_id)
+            else {
+                continue;
+            };
             let face_id = ctx.src_face.id;
             get_mut_unchecked(ctx.src_face)
                 .local_interests
-                .insert(id, InterestState::new(face_id, options, res.clone(), false));
+                .insert(id, prepared.state(face_id, options, res.clone(), false));
             let wire_expr = res
                 .as_ref()
                 .map(|res| Resource::decl_key(res, ctx.src_face));
@@ -154,14 +165,24 @@ impl HatInterestTrait for Hat {
         });
 
         for mut dst in dsts {
-            let id = self.face_hat(&dst).next_id.fetch_add(1, Ordering::SeqCst);
+            #[allow(unused_mut)]
+            let Some(mut prepared) =
+                dst.prepare_interest_for(msg.mode, false, res.as_ref(), msg.options)
+            else {
+                continue;
+            };
+            let Some(id) = dst.new_interest_id(&self.face_hat(&dst).next_id) else {
+                continue;
+            };
+            #[cfg(feature = "zenss-route-gate")]
+            let native_reservation = prepared.pending.take();
 
             if msg.mode.is_future() {
                 let dst_id = dst.id;
                 let is_finalized = msg.mode == InterestMode::Future;
                 get_mut_unchecked(&mut dst).local_interests.insert(
                     id,
-                    InterestState::new(dst_id, msg.options, res.clone(), is_finalized),
+                    prepared.state(dst_id, msg.options, res.clone(), is_finalized),
                 );
             }
 
@@ -175,6 +196,8 @@ impl HatInterestTrait for Hat {
                         interest: interest.clone(),
                         cancellation_token,
                         rejection_token,
+                        #[cfg(feature = "zenss-route-gate")]
+                        native_reservation,
                     },
                 );
                 CurrentInterestCleanup::spawn_interest_clean_up_task(
@@ -367,22 +390,22 @@ impl HatInterestTrait for Hat {
         if msg.options.aggregate() {
             if let Some(aggregated_res) = &res {
                 let (sub_id, sub_info) = if msg.mode.is_future() {
+                    let capacity = self.face_hat(ctx.src_face).local_subs.native_capacity(aggregated_res, ctx.src_face, crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Subscriber);
                     let face_hat_mut = self.face_hat_mut(ctx.src_face);
 
-                    for sub in matches {
-                        face_hat_mut.local_subs.insert_simple_resource(
-                            sub.clone(),
-                            SubscriberInfo,
+                    let Some(result) = face_hat_mut
+                        .local_subs
+                        .insert_aggregate_with_matches_with_capacity(
+                            aggregated_res.clone(),
                             || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-                            HashSet::new(),
-                        );
-                    }
-
-                    face_hat_mut.local_subs.insert_aggregated_resource(
-                        aggregated_res.clone(),
-                        || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-                        HashSet::from_iter([msg.id]),
-                    )
+                            HashSet::from_iter([msg.id]),
+                            matches.map(|sub| (sub, SubscriberInfo)).collect(),
+                            capacity,
+                        )
+                    else {
+                        return;
+                    };
+                    result
                 } else {
                     (0, matches.next().map(|_| SubscriberInfo))
                 };
@@ -412,16 +435,20 @@ impl HatInterestTrait for Hat {
         } else if !msg.options.aggregate() && msg.mode.is_current() {
             for sub in matches {
                 let sub_id = if msg.mode.is_future() {
+                    let capacity = self.face_hat(ctx.src_face).local_subs.native_capacity(&sub, ctx.src_face, crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Subscriber);
                     let face_hat_mut = self.face_hat_mut(ctx.src_face);
-                    face_hat_mut
+                    match face_hat_mut
                         .local_subs
-                        .insert_simple_resource(
+                        .insert_simple_resource_with_capacity(
                             sub.clone(),
                             SubscriberInfo,
                             || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
                             HashSet::from([msg.id]),
-                        )
-                        .0
+                            capacity,
+                        ) {
+                        Some((id, _)) => id,
+                        None => continue,
+                    }
                 } else {
                     0
                 };
@@ -465,21 +492,21 @@ impl HatInterestTrait for Hat {
         if msg.options.aggregate() {
             if let Some(aggregated_res) = &res {
                 let (resource_id, qabl_info) = if msg.mode.is_future() {
-                    for (qabl, qabl_info) in matches {
-                        let face_hat_mut = self.face_hat_mut(ctx.src_face);
-                        face_hat_mut.local_qabls.insert_simple_resource(
-                            qabl.clone(),
-                            qabl_info,
-                            || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-                            HashSet::new(),
-                        );
-                    }
+                    let capacity = self.face_hat(ctx.src_face).local_qabls.native_capacity(aggregated_res, ctx.src_face, crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable);
                     let face_hat_mut = self.face_hat_mut(ctx.src_face);
-                    face_hat_mut.local_qabls.insert_aggregated_resource(
-                        aggregated_res.clone(),
-                        || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-                        HashSet::from_iter([msg.id]),
-                    )
+                    let Some(result) = face_hat_mut
+                        .local_qabls
+                        .insert_aggregate_with_matches_with_capacity(
+                            aggregated_res.clone(),
+                            || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
+                            HashSet::from_iter([msg.id]),
+                            matches,
+                            capacity,
+                        )
+                    else {
+                        return;
+                    };
+                    result
                 } else {
                     (
                         QueryableId::default(),
@@ -515,16 +542,20 @@ impl HatInterestTrait for Hat {
         } else if !msg.options.aggregate() && msg.mode.is_current() {
             for (qabl, qabl_info) in matches {
                 let resource_id = if msg.mode.is_future() {
+                    let capacity = self.face_hat(ctx.src_face).local_qabls.native_capacity(&qabl, ctx.src_face, crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable);
                     let face_hat_mut = self.face_hat_mut(ctx.src_face);
-                    face_hat_mut
+                    match face_hat_mut
                         .local_qabls
-                        .insert_simple_resource(
+                        .insert_simple_resource_with_capacity(
                             qabl.clone(),
                             qabl_info,
                             || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
                             HashSet::from([msg.id]),
-                        )
-                        .0
+                            capacity,
+                        ) {
+                        Some((id, _)) => id,
+                        None => continue,
+                    }
                 } else {
                     QueryableId::default()
                 };
@@ -569,12 +600,28 @@ impl HatInterestTrait for Hat {
 
         for token in matches {
             let id = if msg.mode.is_future() {
+                let prepared = self
+                    .face_hat(ctx.src_face)
+                    .local_tokens
+                    .prepare_insert_declaration(
+                    token.clone(),
+                    &token,
+                    ctx.src_face,
+                    crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Token,
+                    false,
+                );
                 let face_hat = self.face_hat_mut(ctx.src_face);
 
-                *face_hat
-                    .local_tokens
-                    .entry(token.clone())
-                    .or_insert_with(|| face_hat.next_id.fetch_add(1, Ordering::SeqCst))
+                if let Some(id) = face_hat.local_tokens.get(&token) {
+                    *id
+                } else {
+                    let Some(prepared) = prepared else {
+                        continue;
+                    };
+                    let id = face_hat.next_id.fetch_add(1, Ordering::SeqCst);
+                    face_hat.local_tokens.insert_prepared(prepared, id);
+                    id
+                }
             } else {
                 TokenId::default()
             };
@@ -616,10 +663,19 @@ impl HatInterestTrait for Hat {
         }
 
         let id = if interest.mode.is_future() {
+            let Some(prepared) = self.face_hat(&dst).local_tokens.prepare_insert_declaration(
+                res.clone(),
+                &res,
+                &dst,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Token,
+                false,
+            ) else {
+                return;
+            };
             let id = self.face_hat(&dst).next_id.fetch_add(1, Ordering::SeqCst);
             self.face_hat_mut(&mut dst)
                 .local_tokens
-                .insert(res.clone(), id);
+                .insert_prepared(prepared, id);
             id
         } else {
             TokenId::default()
@@ -661,30 +717,40 @@ impl HatInterestTrait for Hat {
         );
     }
 
-    #[tracing::instrument(level = "debug", skip(ctx, msg), ret)]
+    #[tracing::instrument(level = "debug", skip_all)]
+    fn prepare_remote_interest(
+        &self,
+        face: &Arc<crate::net::routing::dispatcher::face::FaceState>,
+        msg: &Interest,
+    ) -> Option<Option<crate::net::routing::dispatcher::local_resources::NativeHatInsert<InterestId>>>
+    {
+        let map = &self.face_hat(face).remote_interests;
+        if map.contains_key(&msg.id) {
+            tracing::error!("Interest ids cannot be re-used");
+            return None;
+        }
+        map.prepare_insert_interest(msg.id, face, msg).map(Some)
+    }
+
     fn register_interest(
         &mut self,
         ctx: DispatcherContext,
         msg: &Interest,
         res: Option<Arc<Resource>>,
+        _prepared: Option<
+            crate::net::routing::dispatcher::local_resources::NativeHatInsert<InterestId>,
+        >,
     ) {
-        if self
-            .face_hat_mut(ctx.src_face)
+        self.face_hat_mut(ctx.src_face)
             .remote_interests
-            .contains_key(&msg.id)
-        {
-            tracing::error!("Interest ids cannot be re-used");
-            return;
-        }
-
-        self.face_hat_mut(ctx.src_face).remote_interests.insert(
-            msg.id,
-            RemoteInterest {
-                res,
-                options: msg.options,
-                mode: msg.mode,
-            },
-        );
+            .insert_prepared(
+                _prepared.expect("remote Interest admitted before routing"),
+                RemoteInterest {
+                    res,
+                    options: msg.options,
+                    mode: msg.mode,
+                },
+            );
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, msg), fields(id = msg.id), ret)]

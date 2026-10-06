@@ -2702,7 +2702,7 @@ dependencies = [
  "zenoh-runtime",
  "zenoh-sync",
  "zenoh-task",
- "zenoh-transport",
+ "zenoh-transport 1.10.1",
  "zenoh-util",
 ]
 
@@ -2753,7 +2753,7 @@ dependencies = [
  "zenoh-runtime",
  "zenoh-sync",
  "zenoh-task",
- "zenoh-transport",
+ "zenoh-transport 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-util",
 ]
 
@@ -3046,6 +3046,38 @@ dependencies = [
 [[package]]
 name = "zenoh-transport"
 version = "1.10.1"
+dependencies = [
+ "async-trait",
+ "crossbeam-utils",
+ "flume",
+ "futures",
+ "lazy_static",
+ "lz4_flex",
+ "rand",
+ "ringbuffer-spsc",
+ "serde",
+ "sha3",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zenoh-buffers",
+ "zenoh-codec",
+ "zenoh-config",
+ "zenoh-core",
+ "zenoh-crypto",
+ "zenoh-link",
+ "zenoh-link-commons",
+ "zenoh-protocol",
+ "zenoh-result",
+ "zenoh-runtime",
+ "zenoh-sync",
+ "zenoh-task",
+ "zenoh-util",
+]
+
+[[package]]
+name = "zenoh-transport"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72bae2e0aca56ac6431bd6c37c6ac3fcc9367446cbb356bd44137cc01d1493ee"
 dependencies = [
@@ -3106,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-client-sdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3118,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-contracts"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -3126,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-example-outbound-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -3136,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-example-product-echo"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -3146,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-plugin-trait"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",

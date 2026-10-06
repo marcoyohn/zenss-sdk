@@ -224,3 +224,169 @@ pub(crate) struct LinkInfo {
     pub(crate) dst_weight: Option<u16>,
     pub(crate) actual_weight: u16,
 }
+
+// ZenSS native topology limits. Counts protect allocation before mutation;
+// they are not allocator/RSS byte guarantees. Wire IDs remain interoperable.
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_NODES: usize = 256;
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_LINKS: usize = 64;
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_MAPPINGS: usize = 1024;
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_LOCATORS: usize = 8;
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_PSID: u64 = u16::MAX as u64;
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) const NATIVE_TOPOLOGY_FRAME_BYTES: usize = 1024 * 1024;
+
+#[cfg(feature = "zenss-route-gate")]
+pub(crate) fn admit_native_topology(
+    states: &[LinkState],
+    mappings: &std::collections::BTreeMap<usize, ZenohIdProto>,
+    graph_nodes: impl Iterator<Item = ZenohIdProto>,
+) -> bool {
+    use std::collections::HashSet;
+    if states.len() > NATIVE_TOPOLOGY_NODES || mappings.len() > NATIVE_TOPOLOGY_MAPPINGS {
+        return false;
+    }
+    let mut planned = mappings.clone();
+    let mut ids = HashSet::new();
+    for state in states {
+        if state.psid > NATIVE_TOPOLOGY_PSID
+            || !ids.insert(state.psid)
+            || state.links.len() > NATIVE_TOPOLOGY_LINKS
+            || state.links.iter().any(|id| *id > NATIVE_TOPOLOGY_PSID)
+            || state
+                .link_weights
+                .as_ref()
+                .is_some_and(|weights| weights.len() != state.links.len())
+            || state.locators.as_ref().is_some_and(|locators| {
+                locators.len() > NATIVE_TOPOLOGY_LOCATORS
+                    || locators
+                        .iter()
+                        .any(|loc| loc.as_str().len() > u8::MAX as usize)
+            })
+        {
+            return false;
+        }
+        if let Some(zid) = state.zid {
+            planned.insert(state.psid as usize, zid);
+            if planned.len() > NATIVE_TOPOLOGY_MAPPINGS {
+                return false;
+            }
+        }
+    }
+    // Include every possibly created placeholder, not just explicitly declared nodes.
+    // Account before detached-node cleanup, so transient graph peaks stay bounded.
+    let mut nodes = graph_nodes.collect::<HashSet<_>>();
+    if nodes.len() > NATIVE_TOPOLOGY_NODES {
+        return false;
+    }
+    for state in states {
+        if let Some(zid) = planned.get(&(state.psid as usize)) {
+            nodes.insert(*zid);
+        }
+        for id in &state.links {
+            if let Some(zid) = planned.get(&(*id as usize)) {
+                nodes.insert(*zid);
+            }
+        }
+        if nodes.len() > NATIVE_TOPOLOGY_NODES {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(all(test, feature = "zenss-route-gate"))]
+mod native_topology_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    fn zid(id: usize) -> ZenohIdProto {
+        format!("{:x}", id + 1).parse().unwrap()
+    }
+    fn state(psid: u64, id: usize) -> LinkState {
+        LinkState {
+            psid,
+            sn: 1,
+            zid: Some(zid(id)),
+            whatami: Some(WhatAmI::Router),
+            locators: None,
+            links: vec![],
+            link_weights: None,
+            is_gateway: false,
+        }
+    }
+    #[test]
+    fn preflight_includes_placeholders_and_preserves_input_maps() {
+        let mappings = BTreeMap::from([(0, zid(0)), (1, zid(255)), (2, zid(256))]);
+        let old = mappings.clone();
+        let mut incoming = state(0, 0);
+        incoming.zid = None;
+        incoming.links = vec![1];
+        assert!(admit_native_topology(
+            &[incoming.clone()],
+            &mappings,
+            (0..255).map(zid)
+        ));
+        incoming.links.push(2);
+        assert!(!admit_native_topology(
+            &[incoming],
+            &mappings,
+            (0..255).map(zid)
+        ));
+        assert_eq!(mappings, old);
+        assert!(!admit_native_topology(
+            &[state(3, 256)],
+            &mappings,
+            (0..256).map(zid)
+        ));
+    }
+    #[test]
+    fn preflight_caps_mappings_and_rejects_ambiguous_or_invalid_states() {
+        let mappings = (0..NATIVE_TOPOLOGY_MAPPINGS)
+            .map(|id| (id, zid(0)))
+            .collect::<BTreeMap<_, _>>();
+        assert!(!admit_native_topology(
+            &[state(NATIVE_TOPOLOGY_PSID, 0)],
+            &mappings,
+            std::iter::once(zid(0))
+        ));
+        assert!(admit_native_topology(
+            &[state(0, 1)],
+            &mappings,
+            std::iter::once(zid(0))
+        ));
+        let empty = BTreeMap::new();
+        assert!(!admit_native_topology(
+            &[state(0, 1), state(0, 2)],
+            &empty,
+            std::iter::empty()
+        ));
+        let mut incoming = state(0, 0);
+        incoming.links = vec![0; NATIVE_TOPOLOGY_LINKS + 1];
+        assert!(!admit_native_topology(
+            &[incoming.clone()],
+            &empty,
+            std::iter::empty()
+        ));
+        incoming.links = vec![0];
+        incoming.link_weights = Some(vec![]);
+        assert!(!admit_native_topology(
+            &[incoming.clone()],
+            &empty,
+            std::iter::empty()
+        ));
+        incoming.link_weights = None;
+        incoming.locators = Some(vec![
+            "tcp/127.0.0.1:1".parse().unwrap();
+            NATIVE_TOPOLOGY_LOCATORS + 1
+        ]);
+        assert!(!admit_native_topology(
+            &[incoming],
+            &empty,
+            std::iter::empty()
+        ));
+    }
+}

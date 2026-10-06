@@ -71,13 +71,25 @@ impl Hat {
                 continue;
             }
 
+            let Some(prepared) = self
+                .face_hat(ctx.src_face)
+                .local_qabls
+                .prepare_insert_declaration(
+                res.clone(),
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
+                false,
+            ) else {
+                continue;
+            };
             let id = self
                 .face_hat(ctx.src_face)
                 .next_id
                 .fetch_add(1, Ordering::SeqCst);
             self.face_hat_mut(ctx.src_face)
                 .local_qabls
-                .insert(res.clone(), (id, info));
+                .insert_prepared(prepared, (id, info));
             let key_expr = Resource::decl_key(&res, ctx.src_face);
             tracing::debug!(dst = %ctx.src_face);
             (ctx.send_declare)(
@@ -208,14 +220,25 @@ impl HatQueriesTrait for Hat {
         mut res: Arc<Resource>,
         _node_id: NodeId,
         info: &QueryableInfoType,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
-
-        self.face_hat_mut(ctx.src_face)
+        let Some(prepared) = self
+            .face_hat(ctx.src_face)
             .remote_qabls
-            .entry(id)
-            .and_modify(|(_, old_info)| *old_info = *info)
-            .or_insert_with(|| (res.clone(), *info));
+            .prepare_insert_declaration(
+                id,
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
+                true,
+            )
+        else {
+            return false;
+        };
+
+        let map = &mut self.face_hat_mut(ctx.src_face).remote_qabls;
+        let mapped_res = map.get(&id).map_or_else(|| res.clone(), |(r, _)| r.clone());
+        map.insert_prepared(prepared, (mapped_res, *info));
 
         let new_face_info = self
             .face_hat(ctx.src_face)
@@ -237,6 +260,7 @@ impl HatQueriesTrait for Hat {
                 get_mut_unchecked(ctx).qabl = new_face_info;
             }
         }
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, id, _res, _node_id), ret)]
@@ -297,6 +321,19 @@ impl HatQueriesTrait for Hat {
 
         // TODO(regions*): this didn't check if the info is different before.
         // I need to make sure that all similar code paths are updated like this one is.
+        let Some(prepared) = self
+            .face_hat(&dst_face)
+            .local_qabls
+            .prepare_insert_declaration(
+                res.clone(),
+                &res,
+                &dst_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
+                false,
+            )
+        else {
+            return;
+        };
         let id = match self.face_hat(&dst_face).local_qabls.get(&res) {
             Some((_, old_info)) if old_info == &info => return,
             Some((id, _)) => *id,
@@ -308,7 +345,7 @@ impl HatQueriesTrait for Hat {
 
         self.face_hat_mut(&mut dst_face)
             .local_qabls
-            .insert(res.clone(), (id, info));
+            .insert_prepared(prepared, (id, info));
         let key_expr = Resource::decl_key(&res, &mut dst_face);
         tracing::debug!(dst = %dst_face);
         (ctx.send_declare)(

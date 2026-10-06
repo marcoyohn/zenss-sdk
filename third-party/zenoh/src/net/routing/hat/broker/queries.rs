@@ -86,13 +86,24 @@ impl Hat {
             return;
         }
 
-        let face_hat_mut = self.face_hat_mut(dst);
-        let (_, qabls_to_notify) = face_hat_mut.local_qabls.insert_simple_resource(
-            res.clone(),
-            *info,
-            || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
-            simple_interests,
+        let capacity = self.face_hat(dst).local_qabls.native_capacity(
+            res,
+            dst,
+            crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
         );
+        let face_hat_mut = self.face_hat_mut(dst);
+        let Some((_, qabls_to_notify)) = face_hat_mut
+            .local_qabls
+            .insert_simple_resource_with_capacity(
+                res.clone(),
+                *info,
+                || face_hat_mut.next_id.fetch_add(1, Ordering::SeqCst),
+                simple_interests,
+                capacity,
+            )
+        else {
+            return;
+        };
 
         for update in qabls_to_notify {
             tracing::debug!(dst = %dst);
@@ -335,8 +346,21 @@ impl HatQueriesTrait for Hat {
         mut res: Arc<Resource>,
         _node_id: NodeId,
         info: &QueryableInfoType,
-    ) {
+    ) -> bool {
         debug_assert!(self.owns(ctx.src_face));
+        let Some(prepared) = self
+            .face_hat(ctx.src_face)
+            .remote_qabls
+            .prepare_insert_declaration(
+                id,
+                &res,
+                ctx.src_face,
+                crate::net::routing::dispatcher::local_resources::NativeDeclarationKind::Queryable,
+                true,
+            )
+        else {
+            return false;
+        };
 
         {
             let res = get_mut_unchecked(&mut res);
@@ -356,7 +380,8 @@ impl HatQueriesTrait for Hat {
 
         self.face_hat_mut(ctx.src_face)
             .remote_qabls
-            .insert(id, (res.clone(), *info));
+            .insert_prepared(prepared, (res.clone(), *info));
+        true
     }
 
     #[tracing::instrument(level = "debug", skip(ctx, id, _res, _node_id), ret)]
