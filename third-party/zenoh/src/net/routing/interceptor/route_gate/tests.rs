@@ -804,6 +804,7 @@ fn interest_control_classification_requires_all_reverse_permissions() {
         }
     }
     let mut subject = RouteSubject {
+        public_key_der: None,
         tls_common_name: Some("authenticated".into()),
         role: WhatAmI::Client,
     };

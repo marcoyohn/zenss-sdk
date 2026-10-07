@@ -139,6 +139,8 @@ pub enum RouteAction {
 #[derive(Clone, Debug)]
 pub struct RouteSubject {
     pub tls_common_name: Option<String>,
+    /// Actual native RSA possession handshake, never a wire identity claim.
+    pub public_key_der: Option<Vec<u8>>,
     pub role: WhatAmI,
 }
 #[derive(Clone, Debug)]
@@ -247,6 +249,7 @@ pub(crate) fn transport_subject(transport: &TransportUnicast) -> Option<RouteSub
         .filter(|name| names.all(|next| next == Some(*name)))
         .map(str::to_owned);
     Some(RouteSubject {
+        public_key_der: auth.public_key_der().map(<[u8]>::to_vec),
         tls_common_name,
         role: transport.get_whatami().ok()?,
     })

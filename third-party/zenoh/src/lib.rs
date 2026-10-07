@@ -237,9 +237,9 @@ lazy_static::lazy_static!(
 );
 
 #[cfg(feature = "zenss-router-origin")]
-const GIT_COMMIT: &str = "zenssroutegate2_resourcebudget12";
+const GIT_COMMIT: &str = "zenssroutegate2_resourcebudget12_plaintext1";
 #[cfg(all(feature = "zenss-route-gate", not(feature = "zenss-router-origin")))]
-const GIT_COMMIT: &str = "zenssroutegate1_resourcebudget12";
+const GIT_COMMIT: &str = "zenssroutegate1_resourcebudget12_plaintext1";
 #[cfg(not(feature = "zenss-route-gate"))]
 const GIT_COMMIT: &str = git_version::git_version!(
     args = [

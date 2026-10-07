@@ -48,6 +48,7 @@ mod ext {
 #[derive(Debug)]
 pub struct AuthPubKey {
     lookup: Option<HashSet<ZPublicKey>>,
+    intranet: bool,
     pub_key: ZPublicKey,
     pri_key: ZPrivateKey,
 }
@@ -56,6 +57,7 @@ impl AuthPubKey {
     pub fn new(pub_key: ZPublicKey, pri_key: ZPrivateKey) -> Self {
         Self {
             lookup: Some(HashSet::new()),
+            intranet: false,
             pub_key,
             pri_key,
         }
@@ -89,7 +91,14 @@ impl AuthPubKey {
                     .map_err(|e| zerror!("{} Rsa Public Key: {}.", S, e))?;
                 let pri_key = RsaPrivateKey::from_pkcs1_pem(private)
                     .map_err(|e| zerror!("{} Rsa Private Key: {}.", S, e))?;
-                return Ok(Some(Self::new(pub_key.into(), pri_key.into())));
+                let mut auth = Self::new(pub_key.into(), pri_key.into());
+                #[cfg(feature = "zenss-route-gate")]
+                if config.known_keys_file().as_deref() == Some("zenss:issued-plaintext-keys") {
+                    // Only the closed-source exact gate admits issued identities.
+                    auth.disable_lookup();
+                    auth.intranet = true;
+                }
+                return Ok(Some(auth));
             }
             (Some(_), None) => {
                 bail!("{S} Missing Rsa Private Key: PEM.")
@@ -109,7 +118,14 @@ impl AuthPubKey {
                 let path = Path::new(private);
                 let pri_key = RsaPrivateKey::read_pkcs1_pem_file(path)
                     .map_err(|e| zerror!("{} Rsa Private Key: {}.", S, e))?;
-                return Ok(Some(Self::new(pub_key.into(), pri_key.into())));
+                let mut auth = Self::new(pub_key.into(), pri_key.into());
+                #[cfg(feature = "zenss-route-gate")]
+                if config.known_keys_file().as_deref() == Some("zenss:issued-plaintext-keys") {
+                    // Only the closed-source exact gate admits issued identities.
+                    auth.disable_lookup();
+                    auth.intranet = true;
+                }
+                return Ok(Some(auth));
             }
             (Some(_), None) => {
                 bail!("{S} Missing Rsa Private Key: file.")
@@ -354,11 +370,15 @@ impl<'a> AuthPubKeyFsm<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StateOpen {
     nonce: Vec<u8>,
+    pub(crate) peer_key: Option<ZPublicKey>,
 }
 
 impl StateOpen {
     pub(crate) const fn new() -> Self {
-        Self { nonce: vec![] }
+        Self {
+            nonce: vec![],
+            peer_key: None,
+        }
     }
 }
 
@@ -428,6 +448,7 @@ impl<'a> OpenFsm for &'a AuthPubKeyFsm<'a> {
             .map_err(|_| zerror!("{S} Decryption error."))?;
         drop(r_inner);
 
+        state.peer_key = Some(init_ack.bob_pubkey.clone());
         state.nonce = init_ack
             .bob_pubkey
             .encrypt(&mut *prng, Pkcs1v15Encrypt, nonce.as_slice())?;
@@ -483,6 +504,7 @@ impl<'a> OpenFsm for &'a AuthPubKeyFsm<'a> {
 pub(crate) struct StateAccept {
     nonce: Vec<u8>,
     challenge: u64,
+    pub(crate) peer_key: Option<ZPublicKey>,
 }
 
 impl StateAccept {
@@ -490,6 +512,7 @@ impl StateAccept {
         Self {
             nonce: vec![],
             challenge: 0,
+            peer_key: None,
         }
     }
 
@@ -501,6 +524,7 @@ impl StateAccept {
         Self {
             nonce,
             challenge: rng.gen(),
+            peer_key: None,
         }
     }
 }
@@ -513,7 +537,12 @@ where
     type Output = Result<(), DidntWrite>;
 
     fn write(self, writer: &mut W, x: &StateAccept) -> Self::Output {
-        self.write(&mut *writer, x.challenge)
+        self.write(&mut *writer, x.challenge)?;
+        self.write(&mut *writer, u8::from(x.peer_key.is_some()))?;
+        if let Some(key) = &x.peer_key {
+            self.write(&mut *writer, key)?;
+        }
+        Ok(())
     }
 }
 
@@ -525,16 +554,26 @@ where
 
     fn read(self, reader: &mut R) -> Result<StateAccept, Self::Error> {
         let challenge: u64 = self.read(&mut *reader)?;
+        let present: u8 = self.read(&mut *reader)?;
+        if present > 1 {
+            return Err(DidntRead);
+        }
+        let peer_key = if present == 1 {
+            Some(self.read(&mut *reader)?)
+        } else {
+            None
+        };
         Ok(StateAccept {
             nonce: vec![],
             challenge,
+            peer_key,
         })
     }
 }
 
 impl PartialEq for StateAccept {
     fn eq(&self, other: &Self) -> bool {
-        self.challenge == other.challenge
+        self.challenge == other.challenge && self.peer_key == other.peer_key
     }
 }
 
@@ -564,6 +603,10 @@ impl<'a> AcceptFsm for &'a AuthPubKeyFsm<'a> {
             .map_err(|_| zerror!("{S} Decoding error."))?;
 
         let r_inner = zasyncread!(self.inner);
+        if r_inner.intranet && !(2048..=4096).contains(&init_syn.alice_pubkey.n().bits()) {
+            bail!("{S} Intranet authentication requires 2048..4096 bit RSA.");
+        }
+        state.peer_key = Some(init_syn.alice_pubkey.clone());
         if let Some(lookup) = r_inner.lookup.as_ref() {
             if !lookup.contains(&init_syn.alice_pubkey) {
                 bail!("{S} Unauthorized PubKey.");

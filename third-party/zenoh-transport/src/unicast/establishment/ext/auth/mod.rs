@@ -159,6 +159,20 @@ pub(crate) struct StateOpen {
     usrpwd: Option<usrpwd::StateOpen>,
 }
 
+impl StateOpen {
+    #[cfg(feature = "auth_pubkey")]
+    pub(crate) fn peer_key_der(&self) -> Option<Vec<u8>> {
+        use rsa::pkcs1::EncodeRsaPublicKey;
+        self.pubkey
+            .as_ref()?
+            .peer_key
+            .as_ref()?
+            .to_pkcs1_der()
+            .ok()
+            .map(|d| d.as_bytes().to_vec())
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct StateAccept {
     #[cfg(feature = "auth_pubkey")]
@@ -476,6 +490,8 @@ impl<'a> OpenFsm for &'a AuthFsm<'a> {
 /*            ACCEPT                 */
 /*************************************/
 pub(crate) struct RecvOpenSynOut {
+    #[cfg(feature = "auth_pubkey")]
+    pub(crate) public_key_der: Option<Vec<u8>>,
     #[cfg(feature = "auth_usrpwd")]
     pub(crate) auth_id: UsrPwdId,
 }
@@ -624,6 +640,16 @@ impl<'a> AcceptFsm for &'a AuthFsm<'a> {
             }
         }
         Ok(RecvOpenSynOut {
+            #[cfg(feature = "auth_pubkey")]
+            public_key_der: {
+                use rsa::pkcs1::EncodeRsaPublicKey;
+                state
+                    .pubkey
+                    .as_ref()
+                    .and_then(|s| s.peer_key.as_ref())
+                    .and_then(|k| k.to_pkcs1_der().ok())
+                    .map(|d| d.as_bytes().to_vec())
+            },
             #[cfg(feature = "auth_usrpwd")]
             auth_id,
         })

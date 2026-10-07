@@ -20,6 +20,7 @@ use super::establishment::ext::auth::UsrPwdId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransportAuthId {
     username: Option<String>,
+    public_key_der: Option<Vec<u8>>,
     zid: ZenohIdProto,
     link_auth_ids: Vec<LinkAuthId>,
 }
@@ -28,6 +29,7 @@ impl TransportAuthId {
     pub(crate) fn new(zid: ZenohIdProto) -> Self {
         Self {
             username: None,
+            public_key_der: None,
             zid,
             link_auth_ids: vec![],
         }
@@ -51,6 +53,14 @@ impl TransportAuthId {
 
     pub(crate) fn push_link_auth_id(&mut self, link_auth_id: LinkAuthId) {
         self.link_auth_ids.push(link_auth_id);
+    }
+
+    pub(crate) fn set_public_key_der(&mut self, key: Option<Vec<u8>>) {
+        self.public_key_der = key;
+    }
+    /// Present only after successful native public-key possession authentication.
+    pub fn public_key_der(&self) -> Option<&[u8]> {
+        self.public_key_der.as_deref()
     }
 
     pub fn username(&self) -> Option<&String> {

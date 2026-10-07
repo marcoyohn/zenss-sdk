@@ -1,7 +1,7 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -63,0 +64,2 @@
-+zenss-route-gate = ["internal", "unstable"]
++zenss-route-gate = ["internal", "unstable", "zenoh-transport/zenss-route-gate"]
 +zenss-router-origin = ["zenss-route-gate"]
 @@ -414,0 +417 @@
 +path = "../zenoh-transport"
@@ -168,9 +168,9 @@
 +++ b/src/lib.rs
 @@ -238,0 +239,5 @@
 +#[cfg(feature = "zenss-router-origin")]
-+const GIT_COMMIT: &str = "zenssroutegate2_resourcebudget12";
++const GIT_COMMIT: &str = "zenssroutegate2_resourcebudget12_plaintext1";
 +#[cfg(all(feature = "zenss-route-gate", not(feature = "zenss-router-origin")))]
-+const GIT_COMMIT: &str = "zenssroutegate1_resourcebudget12";
++const GIT_COMMIT: &str = "zenssroutegate1_resourcebudget12_plaintext1";
 +#[cfg(not(feature = "zenss-route-gate"))]
 @@ -255,0 +261,2 @@
 +        "zenss-route-gate",
@@ -8491,7 +8491,7 @@
 +    }
 --- a/src/net/routing/interceptor/route_gate.rs
 +++ b/src/net/routing/interceptor/route_gate.rs
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1221 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// ZenSS extension to Zenoh 1.10.1. Network encoding and native ACLs are unchanged.
 +//! Version-pinned synchronous admission hook. Implementations must be bounded,
@@ -8633,6 +8633,8 @@
 +#[derive(Clone, Debug)]
 +pub struct RouteSubject {
 +    pub tls_common_name: Option<String>,
++    /// Actual native RSA possession handshake, never a wire identity claim.
++    pub public_key_der: Option<Vec<u8>>,
 +    pub role: WhatAmI,
 +}
 +#[derive(Clone, Debug)]
@@ -8741,6 +8743,7 @@
 +        .filter(|name| names.all(|next| next == Some(*name)))
 +        .map(str::to_owned);
 +    Some(RouteSubject {
++        public_key_der: auth.public_key_der().map(<[u8]>::to_vec),
 +        tls_common_name,
 +        role: transport.get_whatami().ok()?,
 +    })
@@ -9712,7 +9715,7 @@
 +mod tests;
 --- a/src/net/routing/interceptor/route_gate/tests.rs
 +++ b/src/net/routing/interceptor/route_gate/tests.rs
-@@ -0,0 +1,1468 @@
+@@ -0,0 +1,1469 @@
 +// SPDX-License-Identifier: Apache-2.0
 +use super::*;
 +
@@ -10519,6 +10522,7 @@
 +        }
 +    }
 +    let mut subject = RouteSubject {
++        public_key_der: None,
 +        tls_common_name: Some("authenticated".into()),
 +        role: WhatAmI::Client,
 +    };

@@ -35,6 +35,7 @@ license = "EPL-2.0 OR Apache-2.0"
 repository = "https://github.com/eclipse-zenoh/zenoh"
 
 [features]
+zenss-route-gate = []
 auth_pubkey = [
     "rsa",
     "transport_auth",

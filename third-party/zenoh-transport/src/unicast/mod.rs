@@ -65,6 +65,8 @@ pub(crate) struct TransportConfigUnicast {
     pub(crate) is_lowlatency: bool,
     #[cfg(feature = "auth_usrpwd")]
     pub(crate) auth_id: UsrPwdId,
+    #[cfg(feature = "auth_pubkey")]
+    pub(crate) public_key_der: Option<Vec<u8>>,
     pub(crate) patch: PatchType,
 }
 

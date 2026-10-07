@@ -1,3 +1,7 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -37,0 +38 @@
++zenss-route-gate = []
 --- a/LICENSE-Apache-2.0.txt
 +++ b/LICENSE-Apache-2.0.txt
 @@ -0,0 +1,73 @@
@@ -461,9 +465,163 @@
 +            )
 +            .unwrap());
 +    }
+--- a/src/unicast/authentication.rs
++++ b/src/unicast/authentication.rs
+@@ -22,0 +23 @@
++    public_key_der: Option<Vec<u8>>,
+@@ -30,0 +32 @@
++            public_key_der: None,
+@@ -55,0 +58,8 @@
++    pub(crate) fn set_public_key_der(&mut self, key: Option<Vec<u8>>) {
++        self.public_key_der = key;
++    }
++    /// Present only after successful native public-key possession authentication.
++    pub fn public_key_der(&self) -> Option<&[u8]> {
++        self.public_key_der.as_deref()
++    }
++
+--- a/src/unicast/establishment/accept.rs
++++ b/src/unicast/establishment/accept.rs
+@@ -111,0 +112,2 @@
++    #[cfg(feature = "auth_pubkey")]
++    other_public_key_der: Option<Vec<u8>>,
+@@ -553,2 +555,2 @@
+-        #[cfg(feature = "auth_usrpwd")]
+-        let user_password_id = self
++        #[cfg(feature = "transport_auth")]
++        let authenticated = self
+@@ -558,2 +560 @@
+-            .map_err(|e| (e, Some(close::reason::GENERIC)))?
+-            .auth_id;
++            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
+@@ -592,0 +594,2 @@
++            #[cfg(feature = "auth_pubkey")]
++            other_public_key_der: authenticated.public_key_der,
+@@ -594 +597 @@
+-            other_auth_id: user_password_id,
++            other_auth_id: authenticated.auth_id,
+@@ -875,0 +879,2 @@
++        #[cfg(feature = "auth_pubkey")]
++        public_key_der: osyn_out.other_public_key_der,
+--- a/src/unicast/establishment/ext/auth/mod.rs
++++ b/src/unicast/establishment/ext/auth/mod.rs
+@@ -161,0 +162,14 @@
++impl StateOpen {
++    #[cfg(feature = "auth_pubkey")]
++    pub(crate) fn peer_key_der(&self) -> Option<Vec<u8>> {
++        use rsa::pkcs1::EncodeRsaPublicKey;
++        self.pubkey
++            .as_ref()?
++            .peer_key
++            .as_ref()?
++            .to_pkcs1_der()
++            .ok()
++            .map(|d| d.as_bytes().to_vec())
++    }
++}
++
+@@ -478,0 +493,2 @@
++    #[cfg(feature = "auth_pubkey")]
++    pub(crate) public_key_der: Option<Vec<u8>>,
+@@ -626,0 +643,10 @@
++            #[cfg(feature = "auth_pubkey")]
++            public_key_der: {
++                use rsa::pkcs1::EncodeRsaPublicKey;
++                state
++                    .pubkey
++                    .as_ref()
++                    .and_then(|s| s.peer_key.as_ref())
++                    .and_then(|k| k.to_pkcs1_der().ok())
++                    .map(|d| d.as_bytes().to_vec())
++            },
+--- a/src/unicast/establishment/ext/auth/pubkey.rs
++++ b/src/unicast/establishment/ext/auth/pubkey.rs
+@@ -50,0 +51 @@
++    intranet: bool,
+@@ -58,0 +60 @@
++            intranet: false,
+@@ -92 +94,8 @@
+-                return Ok(Some(Self::new(pub_key.into(), pri_key.into())));
++                let mut auth = Self::new(pub_key.into(), pri_key.into());
++                #[cfg(feature = "zenss-route-gate")]
++                if config.known_keys_file().as_deref() == Some("zenss:issued-plaintext-keys") {
++                    // Only the closed-source exact gate admits issued identities.
++                    auth.disable_lookup();
++                    auth.intranet = true;
++                }
++                return Ok(Some(auth));
+@@ -112 +121,8 @@
+-                return Ok(Some(Self::new(pub_key.into(), pri_key.into())));
++                let mut auth = Self::new(pub_key.into(), pri_key.into());
++                #[cfg(feature = "zenss-route-gate")]
++                if config.known_keys_file().as_deref() == Some("zenss:issued-plaintext-keys") {
++                    // Only the closed-source exact gate admits issued identities.
++                    auth.disable_lookup();
++                    auth.intranet = true;
++                }
++                return Ok(Some(auth));
+@@ -356,0 +373 @@
++    pub(crate) peer_key: Option<ZPublicKey>,
+@@ -361 +378,4 @@
+-        Self { nonce: vec![] }
++        Self {
++            nonce: vec![],
++            peer_key: None,
++        }
+@@ -430,0 +451 @@
++        state.peer_key = Some(init_ack.bob_pubkey.clone());
+@@ -485,0 +507 @@
++    pub(crate) peer_key: Option<ZPublicKey>,
+@@ -492,0 +515 @@
++            peer_key: None,
+@@ -503,0 +527 @@
++            peer_key: None,
+@@ -516 +540,6 @@
+-        self.write(&mut *writer, x.challenge)
++        self.write(&mut *writer, x.challenge)?;
++        self.write(&mut *writer, u8::from(x.peer_key.is_some()))?;
++        if let Some(key) = &x.peer_key {
++            self.write(&mut *writer, key)?;
++        }
++        Ok(())
+@@ -527,0 +557,9 @@
++        let present: u8 = self.read(&mut *reader)?;
++        if present > 1 {
++            return Err(DidntRead);
++        }
++        let peer_key = if present == 1 {
++            Some(self.read(&mut *reader)?)
++        } else {
++            None
++        };
+@@ -530,0 +569 @@
++            peer_key,
+@@ -537 +576 @@
+-        self.challenge == other.challenge
++        self.challenge == other.challenge && self.peer_key == other.peer_key
+@@ -566,0 +606,4 @@
++        if r_inner.intranet && !(2048..=4096).contains(&init_syn.alice_pubkey.n().bits()) {
++            bail!("{S} Intranet authentication requires 2048..4096 bit RSA.");
++        }
++        state.peer_key = Some(init_syn.alice_pubkey.clone());
+--- a/src/unicast/establishment/open.rs
++++ b/src/unicast/establishment/open.rs
+@@ -769,0 +770,2 @@
++        #[cfg(feature = "auth_pubkey")]
++        public_key_der: state.link.ext_auth.peer_key_der(),
+--- a/src/unicast/lowlatency/transport.rs
++++ b/src/unicast/lowlatency/transport.rs
+@@ -202,0 +203,2 @@
++        #[cfg(feature = "auth_pubkey")]
++        transport_auth_id.set_public_key_der(self.config.public_key_der.clone());
 --- a/src/unicast/mod.rs
 +++ b/src/unicast/mod.rs
-@@ -145,0 +146,9 @@
+@@ -67,0 +68,2 @@
++    #[cfg(feature = "auth_pubkey")]
++    pub(crate) public_key_der: Option<Vec<u8>>,
+@@ -143,0 +146,9 @@
++    }
++
 +    /// ZenSS native-only deadline, not a wire extension or authority.
 +    pub fn schedule_deadline(
 +        &self,
@@ -471,8 +629,6 @@
 +        until: std::time::Instant,
 +    ) -> ZResult<bool> {
 +        self.get_inner()?.schedule_deadline(message, until)
-+    }
-+
 --- a/src/unicast/transport_unicast_inner.rs
 +++ b/src/unicast/transport_unicast_inner.rs
 @@ -101,0 +102,8 @@
@@ -486,14 +642,17 @@
 +    }
 --- a/src/unicast/universal/transport.rs
 +++ b/src/unicast/universal/transport.rs
-@@ -457,0 +458,7 @@
+@@ -439,0 +440,2 @@
++        #[cfg(feature = "auth_pubkey")]
++        transport_auth_id.set_public_key_der(self.config.public_key_der.clone());
+@@ -456,0 +459,7 @@
++    }
 +    fn schedule_deadline(
 +        &self,
 +        msg: NetworkMessageMut,
 +        until: std::time::Instant,
 +    ) -> ZResult<bool> {
 +        self.internal_schedule_with_deadline(msg, Some(until))
-+    }
 --- a/src/unicast/universal/tx.rs
 +++ b/src/unicast/universal/tx.rs
 @@ -108 +108,14 @@

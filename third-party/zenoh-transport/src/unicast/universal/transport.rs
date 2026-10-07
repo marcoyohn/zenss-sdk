@@ -437,6 +437,8 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
 
     fn get_auth_ids(&self) -> TransportAuthId {
         let mut transport_auth_id = TransportAuthId::new(self.get_zid());
+        #[cfg(feature = "auth_pubkey")]
+        transport_auth_id.set_public_key_der(self.config.public_key_der.clone());
         // Convert LinkUnicast auth ids to AuthId
         zread!(self.links)
             .get_links()

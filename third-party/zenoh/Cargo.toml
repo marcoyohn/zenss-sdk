@@ -61,7 +61,7 @@ mode = "644"
 status = "actively-developed"
 
 [features]
-zenss-route-gate = ["internal", "unstable"]
+zenss-route-gate = ["internal", "unstable", "zenoh-transport/zenss-route-gate"]
 zenss-router-origin = ["zenss-route-gate"]
 auth_pubkey = ["zenoh-transport/auth_pubkey"]
 auth_usrpwd = ["zenoh-transport/auth_usrpwd"]

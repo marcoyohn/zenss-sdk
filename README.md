@@ -21,10 +21,10 @@ The repository includes its own public dependency lockfile and Rust toolchain. C
 
 ```toml
 [dependencies]
-zenss-contracts = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.1.1" }
-zenss-client-sdk = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.1.1" }
+zenss-contracts = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
+zenss-client-sdk = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
 # Native server plugin only:
-# zenss-plugin-trait = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.1.1" }
+# zenss-plugin-trait = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
 ```
 
 The tag above is an example; use a tag that exists in this repository or pin an actual published `rev`. Contracts, Plugin SDK and Client SDK share the SDK release version. Registry publication is separate; these crates are not claimed to be on crates.io.
@@ -65,3 +65,5 @@ Official configuration and the fixed resource/performance gates must be verified
 with the actual deployment cap; diagnostic socket injection is not acceptance.
 The accepted Linux fixture uses glibc arena2 and records its node cap separately.
 macOS kernel-window behavior has not been accepted by the Linux measurements.
+
+Version 0.4.0 adds proven RSA transport-key metadata for explicit authenticated intranet TCP products. Native layout IDs end in `_resourcebudget12_plaintext1`; rebuild plugins with the exact matching Host/Build Kit. Route protocol versions `/1` and `/2` are unchanged, but the 0.3.0 native layout is incompatible. This does not make the generic `zenss-client-sdk` accept remote plaintext: Lingshu uses its own official-Zenoh client and HTTPS bootstrap.

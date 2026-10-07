@@ -109,6 +109,8 @@ struct RecvOpenSynOut {
     other_bound: Option<Bound>,
     other_lease: Duration,
     other_initial_sn: TransportSn,
+    #[cfg(feature = "auth_pubkey")]
+    other_public_key_der: Option<Vec<u8>>,
     #[cfg(feature = "auth_usrpwd")]
     other_auth_id: UsrPwdId,
 }
@@ -550,13 +552,12 @@ impl<'a, 'b: 'a> AcceptFsm for &'a mut AcceptLink<'b> {
         }
 
         // Extension Auth
-        #[cfg(feature = "auth_usrpwd")]
-        let user_password_id = self
+        #[cfg(feature = "transport_auth")]
+        let authenticated = self
             .ext_auth
             .recv_open_syn((&mut state.link.ext_auth, open_syn.ext_auth))
             .await
-            .map_err(|e| (e, Some(close::reason::GENERIC)))?
-            .auth_id;
+            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
 
         // Extension MultiLink
         #[cfg(feature = "transport_multilink")]
@@ -590,8 +591,10 @@ impl<'a, 'b: 'a> AcceptFsm for &'a mut AcceptLink<'b> {
             },
             other_lease: open_syn.lease,
             other_initial_sn: open_syn.initial_sn,
+            #[cfg(feature = "auth_pubkey")]
+            other_public_key_der: authenticated.public_key_der,
             #[cfg(feature = "auth_usrpwd")]
-            other_auth_id: user_password_id,
+            other_auth_id: authenticated.auth_id,
         };
         Ok((state, output))
     }
@@ -873,6 +876,8 @@ pub(crate) async fn accept_link(link: LinkUnicast, manager: &TransportManager) -
         is_lowlatency: state.transport.ext_lowlatency.is_lowlatency(),
         #[cfg(feature = "auth_usrpwd")]
         auth_id: osyn_out.other_auth_id,
+        #[cfg(feature = "auth_pubkey")]
+        public_key_der: osyn_out.other_public_key_der,
         patch: state.transport.ext_patch.get(),
         region_name: state.transport.ext_region_name.other_region_name(),
     };

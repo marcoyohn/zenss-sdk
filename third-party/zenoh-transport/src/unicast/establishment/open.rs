@@ -767,6 +767,8 @@ pub(crate) async fn open_link(
         is_lowlatency: state.transport.ext_lowlatency.is_lowlatency(),
         #[cfg(feature = "auth_usrpwd")]
         auth_id: UsrPwdId(None),
+        #[cfg(feature = "auth_pubkey")]
+        public_key_der: state.link.ext_auth.peer_key_der(),
         patch: state.transport.ext_patch.get(),
         region_name: state.transport.ext_region_name.other_region_name(),
     };
