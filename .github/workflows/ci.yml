@@ -1,0 +1,41 @@
+name: Public SDK
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sdk:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.94.1'
+      - name: Verify file integrity
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib, json
+          from pathlib import Path
+          for name, digest in json.loads(Path('sdk-source.json').read_text())['files'].items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          PYTHON
+      - name: Compile public-only packages
+        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Test public-only packages
+        run: cargo test --locked --workspace --all-features
+      - name: Verify build did not change distributed files
+        run: |
+          git diff --exit-code
