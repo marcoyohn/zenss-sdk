@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::time::Duration;
 use tokio::time::Instant;
-use zenss_client_host::{HostBinding, HostClientContext};
+use zenss_client_host::HostBinding;
 use zenss_client_sdk::{Client, ServiceIdentity};
 use zenss_plugin_trait::ManagedPlugin;
 
@@ -41,8 +41,10 @@ async fn main() -> Result<()> {
         timeout: Duration::from_secs(2),
         max_inflight: 8,
     };
-    let adapter = HostClientContext::bind(context.clone(), &session, binding)?;
-    let client = Client::from_host(adapter).await?;
+    let client = Client::from_host(context.clone(), binding).await?;
+    let owned_session = client.session().clone();
+    assert_ne!(owned_session, session);
+    assert_eq!(owned_session.zid(), session.zid());
     let announcement = client.announce(&identity).await?;
     let answer = async {
         let query = queries
@@ -59,6 +61,7 @@ async fn main() -> Result<()> {
     println!("{}", String::from_utf8(response?)?);
     client.close().await?;
     assert!(announcement.is_closed());
+    assert!(owned_session.is_closed());
     assert!(!session.is_closed());
     println!(
         "client closed; host Session remains open ({})",

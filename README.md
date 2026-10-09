@@ -7,7 +7,7 @@ Public contracts, native Plugin SDK and dual-mode Client SDK for **ZenSS (ZeroNo
 | `zenss-contracts` | Versioned keys, lifecycle messages and application identities; no host dependencies |
 | `zenss-plugin-trait` | Native Plugin SDK using the official Zenoh plugin interface, managed lifecycle and version-pinned native admission hook |
 | `zenss-client-sdk` | Explicit outbound/hosted client facade, managed network pools and service discovery |
-| `zenss-client-host` | Optional native adapter for a supplied PluginContext and host Session |
+| `zenss-client-host` | Optional native adapter creating an owned Session on the supplied host Runtime |
 
 ## Build
 
@@ -22,10 +22,10 @@ The repository includes its own public dependency lockfile and Rust toolchain. C
 
 ```toml
 [dependencies]
-zenss-contracts = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
-zenss-client-sdk = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
+zenss-contracts = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.6.0" }
+zenss-client-sdk = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.6.0" }
 # Native server plugin only:
-# zenss-plugin-trait = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.4.0" }
+# zenss-plugin-trait = { git = "https://github.com/marcoyohn/zenss-sdk", tag = "v0.6.0" }
 ```
 
 The tag above is an example; use a tag that exists in this repository or pin an actual published `rev`. Contracts, Plugin SDK and Client SDK share the SDK release version. Registry publication is separate; these crates are not claimed to be on crates.io.
@@ -91,21 +91,23 @@ continue to use official crates.io Zenoh 1.10.1 and never require private source
 
 The test-support managed fixture keeps its declared synthetic topology stable until closure. Real pools continue observing Router topology; no production protocol or Host change is included.
 
-## Explicit hosted clients (v0.5.3)
+## Explicit Runtime ownership (v0.6.0)
 
-Use `Client::connect` to own an outbound Session, or explicitly select
-`Client::from_host(HostClientContext::bind(context, &session, binding)?)` inside a
-native plugin. Both expose query, discovery and presence; host mode never opens
-another Runtime or falls back to network connection. See [the runnable example](sdk/rust/zenss-client-host/examples/host_client.rs).
+Use `Client::connect(options)` for an independent client Runtime and Session, or
+`Client::from_host(context, binding)` for a new client-owned Session sharing the
+zenssd Router Runtime. The latter requires the public `zenss-client-host` adapter.
+Both expose query, discovery, presence and mode-specific `session()` access.
+See [the runnable example](sdk/rust/zenss-client-host/examples/host_client.rs).
 
-The adapter borrows the Session, binds a platform presence identity, finite expiry,
-allowed query prefixes and concurrency. Closing/dropping it removes its own
-announcements and cancels its queries; host and sibling clients remain usable.
-Sharing a Router ZID does not confer product authorization. Native plugins remain
-trusted code, and product protocols still authenticate business principals.
+Each hosted Client owns a distinct Session; closing, dropping, expiring or revoking
+it closes that Session, including raw declarations and retained Session clones.
+Host and sibling Sessions remain usable. Cleanup is tracked through plugin shutdown.
+Raw Session operations bypass facade scope/capacity checks; shared ZID does not
+confer product authorization. Plugins remain trusted native code.
 
-The ordinary client retains official crates.io Zenoh and excludes the native
-adapter/Plugin SDK from its dependency closure. Native use requires rebuilding
-with a matching Host/Plugin SDK/build kit, including shared dependency features.
-This SDK publication does not publish or certify a v0.5.3 Host image. Lingshu's
-current authenticated ManagedPool business channel is unchanged.
+This breaking change replaces 0.5.3's borrowed-Session constructor. Session.clone()
+is not an independent Session; create another Client from PluginContext instead.
+Ordinary clients retain registry Zenoh and exclude the native adapter/Plugin SDK.
+Native consumers rebuild with a matched Host/Plugin SDK/build kit. SDK publication
+does not certify a new Host image; Lingshu's authenticated ManagedPool remains
+outbound. See [the API guide](docs/api.md) for ownership and migration details.

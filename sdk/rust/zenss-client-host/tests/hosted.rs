@@ -46,8 +46,10 @@ impl Host {
             max_inflight: 2,
         }
     }
-    fn adapter(&self, name: &str) -> HostClientContext {
-        HostClientContext::bind(self.context.clone(), &self.session, self.binding(name)).unwrap()
+    async fn client(&self, name: &str) -> Client<HostClientContext> {
+        Client::from_host(self.context.clone(), self.binding(name))
+            .await
+            .unwrap()
     }
     fn command(&self, action: &str) {
         let map = serde_json::json!({"__zenss__":{"command":{"protocol":1,"action":action}}})
@@ -103,9 +105,10 @@ async fn wait_closed(token: &zenss_client_host::HostAnnouncement) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hosted_and_outbound_share_protocol_but_only_hosted_shares_runtime() {
     let host = Host::new().await;
-    let adapter = host.adapter("one");
-    assert_eq!(adapter.runtime_id(), host.runtime.zid().to_string());
-    let hosted = Client::from_host(adapter).await.unwrap();
+    let hosted = host.client("one").await;
+    assert_eq!(hosted.session().zid(), host.runtime.zid());
+    assert_ne!(hosted.session(), &host.session);
+    let owned_session = hosted.session().clone();
     let outbound = Client::connect(ClientOptions {
         endpoints: host
             .runtime
@@ -156,6 +159,7 @@ async fn hosted_and_outbound_share_protocol_but_only_hosted_shares_runtime() {
     let token = hosted.announce(&identity).await.unwrap();
     assert_eq!(token_count(&host.session, &identity).await, 1);
     hosted.close().await.unwrap();
+    assert!(owned_session.is_closed());
     assert!(token.is_closed());
     assert_eq!(token_count(&host.session, &identity).await, 0);
     assert!(!host.session.is_closed());
@@ -168,8 +172,8 @@ async fn hosted_and_outbound_share_protocol_but_only_hosted_shares_runtime() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_drop_and_revoke_remove_only_owned_declarations_and_cancel_work() {
     let host = Host::new().await;
-    let first = Client::from_host(host.adapter("first")).await.unwrap();
-    let second = Client::from_host(host.adapter("second")).await.unwrap();
+    let first = host.client("first").await;
+    let second = host.client("second").await;
     let a = first.announce(first.identity().unwrap()).await.unwrap();
     let b = second.announce(second.identity().unwrap()).await.unwrap();
     first.close().await.unwrap();
@@ -179,9 +183,8 @@ async fn close_drop_and_revoke_remove_only_owned_declarations_and_cancel_work() 
         token_count(&host.session, second.identity().unwrap()).await,
         1
     );
-    let third_adapter = host.adapter("third");
-    let revoke = third_adapter.revocation();
-    let third = Client::from_host(third_adapter).await.unwrap();
+    let third = host.client("third").await;
+    let revoke = third.revocation();
     let queries = host.session.declare_queryable(KEY).await.unwrap();
     let query = third.query(KEY, b"pending".to_vec());
     let cancellation = async {
@@ -206,16 +209,14 @@ async fn expiry_and_parent_drain_revoke_presence_and_pending_queries() {
     let host = Host::new().await;
     let mut binding = host.binding("expiring");
     binding.expires_at = Instant::now() + Duration::from_millis(200);
-    let client = Client::from_host(
-        HostClientContext::bind(host.context.clone(), &host.session, binding).unwrap(),
-    )
-    .await
-    .unwrap();
+    let client = Client::from_host(host.context.clone(), binding)
+        .await
+        .unwrap();
     let token = client.announce(client.identity().unwrap()).await.unwrap();
     wait_closed(&token).await;
     assert!(client.query(KEY, Vec::new()).await.is_err());
     client.close().await.unwrap();
-    let client = Client::from_host(host.adapter("draining")).await.unwrap();
+    let client = host.client("draining").await;
     let token = client.announce(client.identity().unwrap()).await.unwrap();
     let queries = host.session.declare_queryable(KEY).await.unwrap();
     let action = async {
@@ -233,7 +234,9 @@ async fn expiry_and_parent_drain_revoke_presence_and_pending_queries() {
     wait_closed(&token).await;
     assert_eq!(host.context.snapshot().active_requests, 0);
     assert!(
-        HostClientContext::bind(host.context.clone(), &host.session, host.binding("late")).is_err()
+        Client::from_host(host.context.clone(), host.binding("late"))
+            .await
+            .is_err()
     );
     client.close().await.unwrap();
     assert!(!host.session.is_closed());
@@ -247,11 +250,9 @@ async fn scope_identity_capacity_and_timeout_are_enforced_without_replay() {
     let mut binding = host.binding("limited");
     binding.max_inflight = 1;
     binding.timeout = Duration::from_millis(100);
-    let client = Client::from_host(
-        HostClientContext::bind(host.context.clone(), &host.session, binding).unwrap(),
-    )
-    .await
-    .unwrap();
+    let client = Client::from_host(host.context.clone(), binding)
+        .await
+        .unwrap();
     for key in [
         "zenss/v1/other/products/echo/one/query",
         "zenss/v1/dev/products/echo/one-other/query",
@@ -288,11 +289,9 @@ async fn scope_identity_capacity_and_timeout_are_enforced_without_replay() {
     client.close().await.unwrap();
     let mut binding = host.binding("presence-only");
     binding.query_prefixes.clear();
-    let presence = Client::from_host(
-        HostClientContext::bind(host.context.clone(), &host.session, binding).unwrap(),
-    )
-    .await
-    .unwrap();
+    let presence = Client::from_host(host.context.clone(), binding)
+        .await
+        .unwrap();
     assert!(presence.query(KEY, Vec::new()).await.is_err());
     presence.close().await.unwrap();
     drop((held, queries));
@@ -300,15 +299,8 @@ async fn scope_identity_capacity_and_timeout_are_enforced_without_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejects_foreign_or_closed_sessions_and_invalid_bindings() {
+async fn rejects_invalid_bindings_and_raw_session_closure_is_terminal() {
     let host = Host::new().await;
-    let other = Host::new().await;
-    assert!(HostClientContext::bind(
-        host.context.clone(),
-        &other.session,
-        host.binding("foreign")
-    )
-    .is_err());
     for scope in [
         "zenss/v1/dev",
         "zenss/v1/other/products/echo",
@@ -317,25 +309,27 @@ async fn rejects_foreign_or_closed_sessions_and_invalid_bindings() {
     ] {
         let mut binding = host.binding("invalid");
         binding.query_prefixes = vec![scope.into()];
-        assert!(HostClientContext::bind(host.context.clone(), &host.session, binding).is_err());
+        assert!(Client::from_host(host.context.clone(), binding)
+            .await
+            .is_err());
     }
-    let client = Client::from_host(host.adapter("closed")).await.unwrap();
+    let client = host.client("closed").await;
     let token = client.announce(client.identity().unwrap()).await.unwrap();
-    host.session.close().await.unwrap();
+    client.session().close().await.unwrap();
     wait_closed(&token).await;
     assert!(client.query(KEY, Vec::new()).await.is_err());
-    assert!(
-        HostClientContext::bind(host.context.clone(), &host.session, host.binding("late")).is_err()
-    );
+    assert!(!host.session.is_closed());
+    let sibling = host.client("after-raw-close").await;
+    assert!(!sibling.session().is_closed());
+    sibling.close().await.unwrap();
     client.close().await.unwrap();
-    other.close().await;
     host.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_failure_revokes_client_and_scoped_cleanup_is_acknowledged() {
     let host = Host::new().await;
-    let client = Client::from_host(host.adapter("failure")).await.unwrap();
+    let client = host.client("failure").await;
     let token = client.announce(client.identity().unwrap()).await.unwrap();
     host.context
         .spawn_scoped(async {
@@ -356,5 +350,195 @@ async fn plugin_failure_revokes_client_and_scoped_cleanup_is_acknowledged() {
         host.context.snapshot().phase,
         zenss_plugin_trait::zenss_contracts::PluginPhase::Failed
     );
+    host.close().await;
+}
+
+async fn wait_session_closed(session: &zenoh::Session) {
+    timeout(Duration::from_secs(2), async {
+        while !session.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_entities_and_clones_close_while_sibling_and_host_keep_communicating() {
+    let host = Host::new().await;
+    let first = host.client("raw-owner").await;
+    let sibling = host.client("raw-sibling").await;
+    let own = first.session().clone();
+    assert_ne!(&own, sibling.session());
+    assert_ne!(&own, &host.session);
+    assert_eq!(own.zid(), sibling.session().zid());
+    let raw_key = "zenss/v1/dev/products/raw/one/query";
+    // Deliberate raw escape hatch outside the facade's echo scope.
+    let queryable = own.declare_queryable(raw_key).await.unwrap();
+    let subscriber = own.declare_subscriber("raw/events").await.unwrap();
+    let publisher = own.declare_publisher("raw/events").await.unwrap();
+    publisher.put("before close").await.unwrap();
+    let sample = timeout(Duration::from_secs(1), subscriber.recv_async())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sample.payload().to_bytes().as_ref(), b"before close");
+    own.declare_queryable("raw/background")
+        .callback(|_| {})
+        .background()
+        .await
+        .unwrap();
+    let (reply, ()) = tokio::join!(
+        async {
+            let replies = host.session.get(raw_key).await.unwrap();
+            replies
+                .recv_async()
+                .await
+                .unwrap()
+                .into_result()
+                .unwrap()
+                .payload()
+                .to_bytes()
+                .into_owned()
+        },
+        async {
+            let q = queryable.recv_async().await.unwrap();
+            q.reply(raw_key, "before close").await.unwrap();
+        }
+    );
+    assert_eq!(reply, b"before close");
+    first.close().await.unwrap();
+    assert!(own.is_closed()); // even though an application still holds a clone
+    assert!(publisher.put("must fail").await.is_err());
+    assert!(timeout(Duration::from_secs(1), queryable.recv_async())
+        .await
+        .unwrap()
+        .is_err());
+    assert!(timeout(Duration::from_secs(1), subscriber.recv_async())
+        .await
+        .unwrap()
+        .is_err());
+    let queries = host.session.declare_queryable(KEY).await.unwrap();
+    let (result, ()) = tokio::join!(sibling.query(KEY, Vec::new()), async {
+        let q = queries.recv_async().await.unwrap();
+        q.reply(KEY, "still alive").await.unwrap();
+    });
+    assert_eq!(result.unwrap(), b"still alive");
+    assert!(!host.runtime.is_closed());
+    assert!(!host.session.is_closed());
+    drop(queries);
+    // Closing the plugin's own Session must not revoke the independently owned Client.
+    host.session.close().await.unwrap();
+    let responder = host.context.session().await.unwrap();
+    let queries = responder.declare_queryable(KEY).await.unwrap();
+    let (result, ()) = tokio::join!(sibling.query(KEY, Vec::new()), async {
+        let q = queries.recv_async().await.unwrap();
+        q.reply(KEY, "independent of plugin Session").await.unwrap();
+    });
+    assert_eq!(result.unwrap(), b"independent of plugin Session");
+    assert!(!sibling.session().is_closed());
+    responder.close().await.unwrap();
+    sibling.close().await.unwrap();
+    host.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn cancelled_close_waiter_and_unpolled_close_still_reclaim_owned_sessions() {
+    use std::{future::Future, task::Poll};
+    let host = Host::new().await;
+    let client = host.client("cancelled-close").await;
+    let session = client.session().clone();
+    tokio::spawn(async move {
+        let mut closing = Box::pin(client.close());
+        // Occupy this runtime's single worker while polling once: the tracked
+        // supervisor cannot finish until this task yields after dropping close.
+        let pending =
+            std::future::poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx).is_pending())).await;
+        assert!(pending);
+        drop(closing);
+    })
+    .await
+    .unwrap();
+    wait_session_closed(&session).await;
+    let client = host.client("never-polled").await;
+    let session = client.session().clone();
+    drop(client.close());
+    wait_session_closed(&session).await;
+    assert!(host.context.accepting());
+    assert!(!host.session.is_closed());
+    host.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expiry_revocation_drop_and_stop_close_raw_sessions_before_cleanup_ack() {
+    let host = Host::new().await;
+    let mut binding = host.binding("expire-raw");
+    binding.expires_at = Instant::now() + Duration::from_millis(150);
+    let expires = Client::from_host(host.context.clone(), binding)
+        .await
+        .unwrap();
+    wait_session_closed(expires.session()).await;
+    expires.close().await.unwrap();
+    let revoked = host.client("revoke-raw").await;
+    revoked.revocation().revoke();
+    wait_session_closed(revoked.session()).await;
+    revoked.close().await.unwrap();
+    let dropped = host.client("drop-raw").await;
+    let session = dropped.session().clone();
+    drop(dropped);
+    wait_session_closed(&session).await;
+    let stopped = host.client("stop-raw").await;
+    host.command("stop");
+    timeout(Duration::from_secs(2), async {
+        while !host.context.snapshot().cleanup_complete {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(stopped.session().is_closed());
+    assert!(!host.runtime.is_closed());
+    assert!(!host.session.is_closed());
+    stopped.close().await.unwrap();
+    host.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_runtime_shutdown_closes_clients_and_rejects_new_construction() {
+    let host = Host::new().await;
+    let client = host.client("runtime-stop").await;
+    host.runtime.close().await.unwrap();
+    wait_session_closed(client.session()).await;
+    assert!(
+        Client::from_host(host.context.clone(), host.binding("late"))
+            .await
+            .is_err()
+    );
+    client.close().await.unwrap();
+    host.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_thread_host_factory_is_rejected_before_native_session_creation() {
+    let host = Host::new().await;
+    let context = host.context.clone();
+    let binding = host.binding("unsupported-runtime");
+    let error = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            match Client::from_host(context, binding).await {
+                Ok(_) => panic!("single-thread construction must be rejected"),
+                Err(error) => error.to_string(),
+            }
+        })
+    })
+    .await
+    .unwrap();
+    assert!(error.contains("multithread Tokio"));
+    assert!(host.context.accepting());
+    assert!(!host.session.is_closed());
     host.close().await;
 }

@@ -1,5 +1,8 @@
 pub mod backend;
-pub use backend::{ClientMode, ClientTransport, HostedTransport, OutboundTransport};
+pub use backend::{
+    ClientMode, ClientTransport, HostSessionSource, HostedTransport, OutboundTransport,
+    SessionTransport,
+};
 pub mod connectivity;
 pub mod credentials;
 mod managed;
@@ -123,7 +126,11 @@ impl Client {
         })
     }
     /// Explicit native attachment. No connect options, probing or network fallback.
-    pub async fn from_host<T: HostedTransport>(host: T) -> Result<Client<T>> {
+    pub async fn from_host<S, B>(source: S, binding: B) -> Result<Client<S::Transport>>
+    where
+        S: HostSessionSource<B>,
+    {
+        let host = source.open_host_session(binding).await?;
         ensure!(host.mode() == ClientMode::Hosted, "host adapter required");
         ensure!(
             (Duration::from_millis(1)..=Duration::from_secs(300)).contains(&host.timeout()),
@@ -132,9 +139,17 @@ impl Client {
         host.ensure_open()?;
         Ok(Client { transport: host })
     }
-    /// Outbound-only escape hatch. Hosted access stays in its scoped adapter.
-    pub fn session(&self) -> &zenoh::Session {
-        &self.transport.session
+}
+impl<T: SessionTransport> Client<T> {
+    /// This client's Session. Cloning shares it; closing a clone closes this
+    /// client. Raw operations bypass facade scope and capacity enforcement.
+    pub fn session(&self) -> &T::Session {
+        self.transport.session()
+    }
+}
+impl<T: HostedTransport> Client<T> {
+    pub fn revocation(&self) -> T::Revocation {
+        self.transport.revocation()
     }
 }
 impl<T: ClientTransport> Client<T> {

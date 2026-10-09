@@ -8,7 +8,8 @@ use std::{
 use tokio::{sync::Semaphore, task::JoinHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 use zenss_client_sdk::{
-    ClientMode, ClientTransport, HostedTransport, ServiceIdentity, MAX_MESSAGE_BYTES,
+    ClientMode, ClientTransport, HostSessionSource, HostedTransport, ServiceIdentity,
+    SessionTransport, MAX_MESSAGE_BYTES,
 };
 use zenss_plugin_trait::{zenss_contracts::PluginPhase, PluginContext};
 
@@ -70,7 +71,9 @@ impl HostBinding {
 type TokenSlot = Mutex<Option<zenoh::liveliness::LivelinessToken>>;
 struct Lifetime {
     closed: CancellationToken,
+    // Bounded facade bookkeeping; the owned Session also cleans up raw entities.
     declarations: Mutex<Vec<Weak<TokenSlot>>>,
+    cleanup: Mutex<Option<std::result::Result<(), String>>>,
 }
 impl Lifetime {
     fn close(&self) {
@@ -128,8 +131,8 @@ impl HostRevocation {
     }
 }
 
-/// Owns only scoped client work and declarations. The supplied Session is borrowed
-/// by cloning its handle; it is NEVER closed by this adapter, including failures.
+/// Owns a dedicated Session created on PluginContext's Runtime. Closing this
+/// client also closes raw Session clones and declarations, never the host Runtime.
 pub struct HostClientContext {
     context: PluginContext,
     session: zenoh::Session,
@@ -139,24 +142,28 @@ pub struct HostClientContext {
     task: Option<JoinHandle<()>>,
 }
 impl HostClientContext {
-    pub fn bind(
-        context: PluginContext,
-        session: &zenoh::Session,
-        binding: HostBinding,
-    ) -> Result<Self> {
+    async fn open(context: PluginContext, binding: HostBinding) -> Result<Self> {
         binding.validate()?;
-        ensure!(!session.is_closed(), "host session closed");
         ensure!(
-            session.zid() == context.runtime.zid(),
-            "session belongs to another host node"
+            tokio::runtime::Handle::try_current().is_ok_and(
+                |handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            ),
+            "hosted clients require a multithread Tokio runtime"
         );
         ensure!(
-            !terminal(context.snapshot().phase),
-            "plugin is shutting down"
+            !terminal(context.snapshot().phase) && !context.runtime.is_closed(),
+            "host is shutting down"
         );
+        // Each init creates a distinct Session and routing face on the existing
+        // Router. No zenoh::open, new Runtime, listener or outbound socket.
+        let session = context
+            .session()
+            .await
+            .map_err(|e| anyhow::anyhow!("host Session creation failed: {e}"))?;
         let lifetime = Arc::new(Lifetime {
             closed: CancellationToken::new(),
             declarations: Mutex::new(Vec::new()),
+            cleanup: Mutex::new(None),
         });
         let observer = lifetime.clone();
         let parent = context.clone();
@@ -171,15 +178,17 @@ impl HostClientContext {
                     _ = observer.closed.cancelled() => break,
                     _ = parent.draining() => break,
                     _ = tokio::time::sleep_until(deadline) => break,
-                    _ = tick.tick() => if shared.is_closed() || terminal(parent.snapshot().phase) { break; },
+                    _ = tick.tick() => if shared.is_closed() || parent.runtime.is_closed() || terminal(parent.snapshot().phase) { break; },
                 }
             }
             observer.close();
-            Ok(())
+            let result = shared.close().await;
+            *observer.cleanup.lock().unwrap() = Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            result
         }).map_err(|e| anyhow::anyhow!("host cleanup registration rejected: {e}"))?;
         Ok(Self {
             context,
-            session: session.clone(),
+            session,
             capacity: Arc::new(Semaphore::new(binding.max_inflight)),
             binding,
             lifetime,
@@ -195,6 +204,7 @@ impl HostClientContext {
     fn check(&self) -> Result<()> {
         if self.lifetime.closed.is_cancelled()
             || self.session.is_closed()
+            || self.context.runtime.is_closed()
             || Instant::now() >= self.binding.expires_at
             || terminal(self.context.snapshot().phase)
         {
@@ -210,7 +220,25 @@ fn terminal(phase: PluginPhase) -> bool {
         PluginPhase::Draining | PluginPhase::Stopping | PluginPhase::Stopped | PluginPhase::Failed
     )
 }
-impl HostedTransport for HostClientContext {}
+impl HostedTransport for HostClientContext {
+    type Revocation = HostRevocation;
+    fn revocation(&self) -> HostRevocation {
+        self.revocation()
+    }
+}
+impl SessionTransport for HostClientContext {
+    type Session = zenoh::Session;
+    fn session(&self) -> &Self::Session {
+        &self.session
+    }
+}
+#[async_trait::async_trait]
+impl HostSessionSource<HostBinding> for PluginContext {
+    type Transport = HostClientContext;
+    async fn open_host_session(self, binding: HostBinding) -> Result<HostClientContext> {
+        HostClientContext::open(self, binding).await
+    }
+}
 #[async_trait::async_trait]
 impl ClientTransport for HostClientContext {
     type Announcement = HostAnnouncement;
@@ -295,7 +323,11 @@ impl ClientTransport for HostClientContext {
             task.await
                 .map_err(|e| anyhow::anyhow!("host client cleanup failed: {e}"))?;
         }
-        Ok(())
+        match self.lifetime.cleanup.lock().unwrap().as_ref() {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => anyhow::bail!("host Session cleanup failed: {error}"),
+            None => anyhow::bail!("host Session cleanup did not complete"),
+        }
     }
 }
 impl Drop for HostClientContext {

@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-client-host"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-client-sdk"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3370,7 +3370,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-contracts"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -3378,7 +3378,7 @@ dependencies = [
 
 [[package]]
 name = "zenss-example-outbound-client"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -3388,17 +3388,19 @@ dependencies = [
 
 [[package]]
 name = "zenss-example-product-echo"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "serde_json",
  "tokio",
  "zenoh 1.10.1",
+ "zenss-client-host",
+ "zenss-client-sdk",
  "zenss-plugin-trait",
 ]
 
 [[package]]
 name = "zenss-plugin-trait"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",

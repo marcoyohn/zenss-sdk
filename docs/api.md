@@ -29,14 +29,17 @@ The SDK opens explicit outbound sessions in Zenoh client mode. Scouting and list
 
 `query` addresses a bounded exact key, rejects wildcard queries and oversized requests/replies, and returns the first result or an error. A timeout is an unknown business outcome; the SDK does not replay business writes. `discover(deployment)` calls the platform discovery capability and validates every returned identity's scope. Keep the token returned by `announce` alive for the desired presence lifetime. Native `session()` APIs are available for subscriptions and product-specific protocols. Endpoint lists are failover/topology inputs, not a promised arbitrary connection pool.
 
-## Host Session Client SDK (v0.5.3)
+## Shared Runtime Client SDK (v0.6.0)
 
-Native plugins add `zenss-client-host` separately. The ordinary `zenss-client-sdk`
-never depends on it. Use the PluginContext and Session supplied by your plugin's
-composition root:
+Native plugins add `zenss-client-host` separately. It implements the public
+`HostSessionSource<HostBinding>` factory for `PluginContext`; the ordinary Client
+SDK never depends on the adapter or Plugin SDK. Hosted construction requires a
+multithread Tokio runtime (unsupported executors fail before Session creation).
+Each construction creates a new
+Session on the supplied host Runtime, without opening another Runtime or socket.
 
 ```rust
-use zenss_client_host::{HostBinding, HostClientContext};
+use zenss_client_host::HostBinding;
 use zenss_client_sdk::{Client, ServiceIdentity};
 use std::time::Duration;
 let binding = HostBinding {
@@ -46,46 +49,61 @@ let binding = HostBinding {
     timeout: Duration::from_secs(2),
     max_inflight: 8,
 };
-let host = HostClientContext::bind(context.clone(), &session, binding)?;
-let revoke = host.revocation();
-let client = Client::from_host(host).await?;
+let client = Client::from_host(context.clone(), binding).await?;
+let revoke = client.revocation();
+let owned_session = client.session().clone();
 let presence = client.announce(client.identity().unwrap()).await?;
 let reply = client.query("zenss/v1/dev/products/echo/one/query", b"hello".to_vec()).await?;
-client.close().await?; // only this client's resources
+client.close().await?;
 assert!(presence.is_closed());
-assert!(!session.is_closed());
+assert!(owned_session.is_closed()); // a retained clone cannot prolong client resources
 # Ok::<(), anyhow::Error>(())
 ```
 
 Run `cargo run --locked -p zenss-client-host --example host_client` for a complete
-composition fixture. Real plugins receive their context from `ManagedPlugin::start`;
-they do not build another Runtime. `context.spawn_scoped` tracks finite cleanup
-workers, while `context.spawn` supervises required long-lived children.
+composition fixture. The `product-echo` native plugin additionally verifies a
+client-owned Session and its cleanup across the dynamic library boundary before
+readiness. Real plugins receive their context from `ManagedPlugin::start`.
+The SDK calls `context.session().await`, which uses native `zenoh::session::init`
+on the existing Runtime. Multiple clients have distinct Sessions and share the
+Router ZID, network transports and routing infrastructure. Closing a sibling or
+plugin-owned Session does not close this Client. Sharing the Runtime does not
+change the Router into a client node or grant a business principal.
 
-Host binding validates identity and Session node consistency, exact deployment,
-expiry, 1..1024 concurrent requests and 1ms..300s timeout. Query scopes name product
+Host binding validates identity, host lifecycle, deployment, expiry,
+1..1024 concurrent facade queries and 1ms..300s timeout. Query scopes name product
 subtrees or the exact deployment discovery key; an empty list allows presence only.
-Wildcard, management, foreign deployment and discovery descendant queries are
-rejected. Announcement identity must equal the binding. This is a trusted native
-composition policy, not authentication of a remote application or sandboxing of a
-plugin with Runtime access. Product signatures, role leases and acknowledgements
-remain mandatory where required by that product.
+Wildcard, management, foreign deployment and discovery descendant facade queries
+are rejected. Announcement identity must equal the binding. These checks are trusted
+composition policy, not a sandbox for native plugins. Product services still
+validate signatures, role leases, permissions and acknowledgements as required.
 
-Close, Drop, revoke, expiry, Session closure and parent drain/failure terminate
-client work without replay or network fallback. Hosted clients intentionally expose
-no raw Session escape hatch; plugin-owned subscriptions and Queryables use the
-supplied Plugin SDK Session. Outbound `client.session()` retains its existing API.
-Multiple hosted clients may borrow one Session; they share routing/transport and
-keep separate declarations and budgets. Each `connect` owns an independent network
-Session. `session.clone()` shares the same logical Session.
+`SessionTransport` exposes `client.session()` in both modes through an associated
+type: registry Zenoh for outbound clients, native build-kit Zenoh for hosted clients.
+Raw declarations and requests bypass facade scope, capacity and payload checks;
+the calling native plugin is responsible for their policy and task shutdown.
+`session.clone()` shares the same Session, and closing any clone closes that Client.
+Use `PluginContext` to create another independent Session; Session's Runtime getter
+is not a public API. Host Client exposes no shutdown method for the shared Runtime.
 
-Only the existing basic Client query/discover/announce API is dual mode. ManagedPool
-and Lingshu Provider/Call/Event business channels still use their authenticated
-outbound transport. Official Zenoh itself has a registry `zenoh-plugin-trait` dependency; the firewall
-permits that upstream dependency but rejects the ZenSS Plugin SDK, patched sources
-and plugin-loading features from the ordinary client closure.
-Native consumers must use an independently verified matching
-Host/Plugin SDK/build kit. This release alone does not certify a new Host image.
+Close, Drop, revoke, expiry, own Session closure, Runtime closure and parent drain
+or failure initiate tracked Session cleanup. This closes raw Queryables/subscribers
+and retained Session clones as well as facade declarations. Explicit close awaits
+cleanup; cancelling that waiter still leaves the tracked cleanup running. Plugin
+cleanup acknowledgment waits for the worker. Caller-owned handler tasks must observe
+their own shutdown signals; Session close does not undo or forcibly abort business
+work already running. No business replay or fallback to outbound connection occurs.
+
+Migration from 0.5.3: replace `HostClientContext::bind(context, &session, binding)`
+and the single-argument `from_host` call with `Client::from_host(context, binding)`.
+The borrowed-Session API is removed. Network `Client::connect(options)` stays intact.
+Only the basic Client query/discover/announce facade is dual mode; ManagedPool and
+Lingshu Provider/Call/Event continue their authenticated outbound transport.
+Official registry Zenoh includes its own `zenoh-plugin-trait`; the dependency
+firewall permits this upstream library while excluding ZenSS Plugin SDK, patched
+sources and plugin-loading features from ordinary clients. Native consumers must
+use a matched Host/Plugin SDK/build kit. This SDK release does not publish a Host
+image or certify Linux native binaries.
 
 ## Native Plugin SDK
 

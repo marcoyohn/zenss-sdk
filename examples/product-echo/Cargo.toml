@@ -17,6 +17,8 @@ name = "zenss_plugin_echo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+zenss-client-sdk.workspace = true
+zenss-client-host.workspace = true
 zenss-plugin-trait.workspace = true
 zenoh.workspace = true
 serde_json.workspace = true

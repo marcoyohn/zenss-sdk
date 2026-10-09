@@ -9,8 +9,8 @@ pub enum ClientMode {
     Hosted,
 }
 
-/// Implementations own their resource policy. Host adapters must never close
-/// a borrowed Session or use shared network identity as product authorization.
+/// Implementations own their resource policy. Host adapters own their Session and must never close
+/// the borrowed Runtime or use shared network identity as product authorization.
 #[async_trait::async_trait]
 pub trait ClientTransport: Send + Sync {
     type Announcement: Send;
@@ -25,9 +25,26 @@ pub trait ClientTransport: Send + Sync {
     async fn close(self) -> Result<()>;
 }
 
-/// Marker for explicit host adapters. Implemented by the separately selected
-/// native integration crate, never discovered implicitly from process context.
-pub trait HostedTransport: ClientTransport {}
+/// Native integration is selected explicitly, never discovered from process context.
+pub trait HostedTransport: ClientTransport {
+    type Revocation;
+    fn revocation(&self) -> Self::Revocation;
+}
+
+/// A public factory boundary without native Runtime or Session types. Native
+/// adapters implement this for their public plugin context and binding types.
+#[async_trait::async_trait]
+pub trait HostSessionSource<Binding>: Send {
+    type Transport: HostedTransport;
+    async fn open_host_session(self, binding: Binding) -> Result<Self::Transport>;
+}
+
+/// Low-level escape hatch. Types differ by backend. Raw operations bypass facade
+/// scope and capacity checks; product services still enforce authorization.
+pub trait SessionTransport: ClientTransport {
+    type Session;
+    fn session(&self) -> &Self::Session;
+}
 
 pub struct OutboundTransport {
     pub(crate) session: zenoh::Session,
@@ -82,5 +99,12 @@ impl ClientTransport for OutboundTransport {
             .close()
             .await
             .map_err(|e| anyhow::anyhow!("session close failed: {e}"))
+    }
+}
+
+impl SessionTransport for OutboundTransport {
+    type Session = zenoh::Session;
+    fn session(&self) -> &Self::Session {
+        &self.session
     }
 }
