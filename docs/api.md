@@ -29,6 +29,64 @@ The SDK opens explicit outbound sessions in Zenoh client mode. Scouting and list
 
 `query` addresses a bounded exact key, rejects wildcard queries and oversized requests/replies, and returns the first result or an error. A timeout is an unknown business outcome; the SDK does not replay business writes. `discover(deployment)` calls the platform discovery capability and validates every returned identity's scope. Keep the token returned by `announce` alive for the desired presence lifetime. Native `session()` APIs are available for subscriptions and product-specific protocols. Endpoint lists are failover/topology inputs, not a promised arbitrary connection pool.
 
+## Host Session Client SDK (v0.5.3)
+
+Native plugins add `zenss-client-host` separately. The ordinary `zenss-client-sdk`
+never depends on it. Use the PluginContext and Session supplied by your plugin's
+composition root:
+
+```rust
+use zenss_client_host::{HostBinding, HostClientContext};
+use zenss_client_sdk::{Client, ServiceIdentity};
+use std::time::Duration;
+let binding = HostBinding {
+    identity: ServiceIdentity::new("dev", "consumer", "one")?,
+    query_prefixes: vec!["zenss/v1/dev/products/echo/one".into()],
+    expires_at: tokio::time::Instant::now() + Duration::from_secs(60),
+    timeout: Duration::from_secs(2),
+    max_inflight: 8,
+};
+let host = HostClientContext::bind(context.clone(), &session, binding)?;
+let revoke = host.revocation();
+let client = Client::from_host(host).await?;
+let presence = client.announce(client.identity().unwrap()).await?;
+let reply = client.query("zenss/v1/dev/products/echo/one/query", b"hello".to_vec()).await?;
+client.close().await?; // only this client's resources
+assert!(presence.is_closed());
+assert!(!session.is_closed());
+# Ok::<(), anyhow::Error>(())
+```
+
+Run `cargo run --locked -p zenss-client-host --example host_client` for a complete
+composition fixture. Real plugins receive their context from `ManagedPlugin::start`;
+they do not build another Runtime. `context.spawn_scoped` tracks finite cleanup
+workers, while `context.spawn` supervises required long-lived children.
+
+Host binding validates identity and Session node consistency, exact deployment,
+expiry, 1..1024 concurrent requests and 1ms..300s timeout. Query scopes name product
+subtrees or the exact deployment discovery key; an empty list allows presence only.
+Wildcard, management, foreign deployment and discovery descendant queries are
+rejected. Announcement identity must equal the binding. This is a trusted native
+composition policy, not authentication of a remote application or sandboxing of a
+plugin with Runtime access. Product signatures, role leases and acknowledgements
+remain mandatory where required by that product.
+
+Close, Drop, revoke, expiry, Session closure and parent drain/failure terminate
+client work without replay or network fallback. Hosted clients intentionally expose
+no raw Session escape hatch; plugin-owned subscriptions and Queryables use the
+supplied Plugin SDK Session. Outbound `client.session()` retains its existing API.
+Multiple hosted clients may borrow one Session; they share routing/transport and
+keep separate declarations and budgets. Each `connect` owns an independent network
+Session. `session.clone()` shares the same logical Session.
+
+Only the existing basic Client query/discover/announce API is dual mode. ManagedPool
+and Lingshu Provider/Call/Event business channels still use their authenticated
+outbound transport. Official Zenoh itself has a registry `zenoh-plugin-trait` dependency; the firewall
+permits that upstream dependency but rejects the ZenSS Plugin SDK, patched sources
+and plugin-loading features from the ordinary client closure.
+Native consumers must use an independently verified matching
+Host/Plugin SDK/build kit. This release alone does not certify a new Host image.
+
 ## Native Plugin SDK
 
 See [product-echo](../examples/product-echo/src/lib.rs) for the complete buildable example. Implement official `Plugin` with `DynamicRuntime` and `RunningPlugin`, declare it with `declare_zenss_plugin!`, and use `ManagedPlugin::start` to supervise asynchronous initialization, admission, child tasks, drain and cleanup. Read injected deployment/admission settings through `PluginSettings`; do not depend on private `zenssd` or `zenss-config` crates.

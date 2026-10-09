@@ -2,10 +2,10 @@
 [workspace]
 resolver = "2"
 exclude = ["third-party/zenoh", "third-party/zenoh-transport"]
-members = ["contracts/zenss-contracts", "crates/zenss-plugin-trait", "sdk/rust/zenss-client-sdk", "examples/product-echo", "examples/outbound-client"]
+members = ["contracts/zenss-contracts", "crates/zenss-plugin-trait", "sdk/rust/zenss-client-sdk", "sdk/rust/zenss-client-host", "examples/product-echo", "examples/outbound-client"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 rust-version = "1.94.1"
 authors = ["ZenSS Team"]
@@ -28,6 +28,6 @@ license = "Apache-2.0"
 "zenoh-plugin-trait" = { "version" = "=1.10.1" }
 "zenoh-result" = { "version" = "=1.10.1" }
 "zenoh-util" = { "version" = "=1.10.1" }
-"zenss-client-sdk" = { "path" = "sdk/rust/zenss-client-sdk", "version" = "0.5.2" }
-"zenss-contracts" = { "path" = "contracts/zenss-contracts", "version" = "0.5.2" }
+"zenss-client-sdk" = { "path" = "sdk/rust/zenss-client-sdk", "version" = "0.5.3" }
+"zenss-contracts" = { "path" = "contracts/zenss-contracts", "version" = "0.5.3" }
 "zenss-plugin-trait" = { "path" = "crates/zenss-plugin-trait" }

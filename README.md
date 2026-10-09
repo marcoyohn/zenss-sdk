@@ -1,12 +1,13 @@
 # ZenSS SDK
 
-Public contracts, native Plugin SDK and outbound Client SDK for **ZenSS (ZeroNode Serverless Scale)**. This repository is generated from approved committed source files. The private platform host and its history are not distributed here. Edit the source repository, not this generated snapshot.
+Public contracts, native Plugin SDK and dual-mode Client SDK for **ZenSS (ZeroNode Serverless Scale)**. This repository is generated from approved committed source files. The private platform host and its history are not distributed here. Edit the source repository, not this generated snapshot.
 
 | Package | Role |
 | --- | --- |
 | `zenss-contracts` | Versioned keys, lifecycle messages and application identities; no host dependencies |
 | `zenss-plugin-trait` | Native Plugin SDK using the official Zenoh plugin interface, managed lifecycle and version-pinned native admission hook |
-| `zenss-client-sdk` | Outbound TCP/TLS sessions, bounded queries and service discovery |
+| `zenss-client-sdk` | Explicit outbound/hosted client facade, managed network pools and service discovery |
+| `zenss-client-host` | Optional native adapter for a supplied PluginContext and host Session |
 
 ## Build
 
@@ -89,3 +90,22 @@ continue to use official crates.io Zenoh 1.10.1 and never require private source
 ### v0.5.2 fixture correction
 
 The test-support managed fixture keeps its declared synthetic topology stable until closure. Real pools continue observing Router topology; no production protocol or Host change is included.
+
+## Explicit hosted clients (v0.5.3)
+
+Use `Client::connect` to own an outbound Session, or explicitly select
+`Client::from_host(HostClientContext::bind(context, &session, binding)?)` inside a
+native plugin. Both expose query, discovery and presence; host mode never opens
+another Runtime or falls back to network connection. See [the runnable example](sdk/rust/zenss-client-host/examples/host_client.rs).
+
+The adapter borrows the Session, binds a platform presence identity, finite expiry,
+allowed query prefixes and concurrency. Closing/dropping it removes its own
+announcements and cancels its queries; host and sibling clients remain usable.
+Sharing a Router ZID does not confer product authorization. Native plugins remain
+trusted code, and product protocols still authenticate business principals.
+
+The ordinary client retains official crates.io Zenoh and excludes the native
+adapter/Plugin SDK from its dependency closure. Native use requires rebuilding
+with a matching Host/Plugin SDK/build kit, including shared dependency features.
+This SDK publication does not publish or certify a v0.5.3 Host image. Lingshu's
+current authenticated ManagedPool business channel is unchanged.

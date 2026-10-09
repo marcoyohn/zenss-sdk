@@ -1,6 +1,6 @@
 {
   "client_policy": "Network clients use protocol compatibility; host compiler matching is not required.",
-  "lock_sha256": "34d16beca26c7adc00315a5857c6f7006642f99d29140e230fa23eae011aa304",
+  "lock_sha256": "3f71ef508ef894f5596802a003863590e963c321da622cdffec113693fcfc50a",
   "native_plugin_policy": "Match the host compiler, target, features and shared dependency graph. Rebuild with host upgrades; no stable Rust ABI.",
   "native_profiles": {
     "route-gate": {
@@ -20,7 +20,7 @@
   "protocol": 1,
   "route_gate_abi": "zenss-route-gate/1",
   "rust_toolchain": "1.94.1",
-  "sdk_version": "0.5.2",
+  "sdk_version": "0.5.3",
   "vendor_inventory_sha256": "2a57015a814678b48aca9df5112d2cb1871257db9d4670fefdae805e6542e384",
   "zenoh": "1.10.1"
 }
