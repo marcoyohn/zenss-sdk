@@ -223,6 +223,7 @@ impl ManagedPool {
             permit,
             observed,
             metrics,
+            true,
         ))
     }
     fn start(
@@ -233,6 +234,7 @@ impl ManagedPool {
         mut permit: SessionPermit,
         observed: Vec<Option<String>>,
         metrics: PoolMetrics,
+        observe_topology: bool,
     ) -> Self {
         let (stop, mut stopped) = watch::channel(false);
         let (closed, close_status) = watch::channel(None);
@@ -255,7 +257,7 @@ impl ManagedPool {
                     _ = tokio::time::sleep_until(deadline) => { if Instant::now() >= *authorization.borrow() { break CloseReason::AuthorityExpired; } },
                     _ = stopped.changed() => break CloseReason::Explicit,
                     result = authorization.changed() => { if result.is_err() { break CloseReason::Explicit; } },
-                    _ = observation.tick() => connectivity.update(routers(&active).await),
+                    _ = observation.tick(), if observe_topology => connectivity.update(routers(&active).await),
                 }
             };
             connectivity.close();
@@ -345,7 +347,9 @@ impl ManagedPool {
             task.abort();
         }
     }
-    /// Fixture-only adoption; never accepts application credentials or changes server policy.
+    /// Fixture-only adoption with a fixed connected topology, including peer-only
+    /// test sessions. Never accepts credentials or changes server policy. Use
+    /// `open` for real Router observation and topology-change tests.
     #[cfg(feature = "test-support")]
     pub fn fixture(
         sessions: Vec<zenoh::Session>,
@@ -364,6 +368,7 @@ impl ManagedPool {
             SessionPermit(None),
             observed,
             metrics,
+            false,
         )
     }
 }

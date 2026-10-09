@@ -9,11 +9,11 @@
   "files": {
     ".github/workflows/ci.yml": "b2fbf3abc2f25763dd59779390d89b880b05ba9abb0d355adc86c9621f1ff2f5",
     ".gitignore": "95af8a5680ca44ce2f331799f908cb2d2f3dc86efcb57846def37e721f48dde7",
-    "Cargo.lock": "52b580ddec926571f8502485502eead98d8ddbcdbd5fdad1288bd60a747657c9",
-    "Cargo.toml": "6d47b1935a8c47a10e33d29225634ea739495ddb9327f091d5fceecca4fd1e05",
+    "Cargo.lock": "34d16beca26c7adc00315a5857c6f7006642f99d29140e230fa23eae011aa304",
+    "Cargo.toml": "7d8295480515e9e414446c2cd37f323b97fbdaeefedc3be26a79029fbe7db9c2",
     "LICENSE": "912b38e7fd84734519f73972727eb2c922ad3289d6de5d39c028ec499d42939d",
-    "README.md": "0e85e237d638109a28c2bf5e68089d37e03e159373c83d4162cc46956eec50c1",
-    "compatibility.json": "dacd06bab1c2117fe5708059ddc790b362e8cea64a29debb73c74a5ed84b2d46",
+    "README.md": "c42768443ced9bbda0cf11f9535d12aeeefc62fe3f1939fe0d4fbe271e167517",
+    "compatibility.json": "224f6f876ee3b8c58151d58c0a1e73beeca826dd12f4264bb2ee399c05f3c7c4",
     "contracts/zenss-contracts/Cargo.toml": "02154155ed31ddfd8d47ed2832a8cd4fba6eb46f5c494d6d168c6de50376b31b",
     "contracts/zenss-contracts/src/lib.rs": "9eb7ca2668326513b851e22a880167f09b395460ea144b085313ff33bd47cd96",
     "contracts/zenss-contracts/src/route_authorization.rs": "d8de0124b8a7b42138005d9c688d26077e27801828a5bb744c4db9cc03e342a1",
@@ -32,9 +32,9 @@
     "sdk/rust/zenss-client-sdk/src/connectivity.rs": "bd253e5ea3a30ec7c7e85f5b6ad36194f934ac297ea245f61945796dc38dd48f",
     "sdk/rust/zenss-client-sdk/src/credentials.rs": "5d644d5d5baaa165a5bb6d731d29617b929c93e134351d9fbcbdca13e72110a6",
     "sdk/rust/zenss-client-sdk/src/lib.rs": "603263ba33a20097d63c0536d0b55cc531d7fa0ee36ef1974f406b9994f94cc4",
-    "sdk/rust/zenss-client-sdk/src/managed.rs": "34e78a04e59c54482e9ee2646a030b94bcc52f182e344847c59ac09425b27db9",
+    "sdk/rust/zenss-client-sdk/src/managed.rs": "fefa90614a5e8a896a286880512c5b2d06bd58eb39c56f201229b9cddb628863",
     "sdk/rust/zenss-client-sdk/src/transport.rs": "0c5602367a9554d351263fe3c988a7e5ad9b72424a182cfb8d67f60d0fdbf5d1",
-    "sdk/rust/zenss-client-sdk/tests/managed.rs": "6e0498cc6c8f4f5585f24816e4ccc7ca9dc3d0815b8d28e8bc28093cf2f3a4fe",
+    "sdk/rust/zenss-client-sdk/tests/managed.rs": "781c91f5a746211f07e86cf4a6eee0aa4e7c61f945f4610aa3a7b5a94c3ca2eb",
     "third-party/zenoh-route-gate.patch": "2e63577816d64c2182f2b94308f534a365e7bd996b25dcf81a111b4bc3e8d8bb",
     "third-party/zenoh-transport.patch": "7c790f7134eb495c7bf3e1d24fe0b9f2f21e8b46ab2fbf4a925ca814bea98922",
     "third-party/zenoh-transport/Cargo.toml": "084cf0cd538fb575c4476894cccc46a8cc11f3dad460ce0002420706dd821950",
@@ -281,6 +281,6 @@
     "third-party/zenoh/tests/unicity.rs": "8c2b7d44ecc9353171a95a6d473493e31eabeadb7810ac60fb1df649cf5c947f"
   },
   "format": 1,
-  "sdk_version": "0.5.1",
-  "source_commit": "7750aec2633eec87499f50c88d2a195ad7ea0a08"
+  "sdk_version": "0.5.2",
+  "source_commit": "cc6abeb047525e40c72ffb42d62e98db61f372d2"
 }

@@ -85,3 +85,7 @@ the authenticated unencrypted profile; no TLS fallback is attempted.
 This release adds client APIs only. Existing native Host/Plugin SDK/build-kit
 v0.5.0 combinations stay pinned; no v0.5.1 Host image is implied. Network clients
 continue to use official crates.io Zenoh 1.10.1 and never require private source.
+
+### v0.5.2 fixture correction
+
+The test-support managed fixture keeps its declared synthetic topology stable until closure. Real pools continue observing Router topology; no production protocol or Host change is included.

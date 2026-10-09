@@ -421,3 +421,30 @@ async fn cancellation_after_first_lane_closes_partial_pool() {
     wait_capacity(&budget, 4).await;
     f.router.close().await.unwrap();
 }
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixture_topology_remains_fixed_across_observation_ticks_and_closes() {
+    let f = Fixture::new().await;
+    let session = zenoh::open(f.options().configuration(0).unwrap())
+        .await
+        .unwrap();
+    let mut pool = ManagedPool::fixture(
+        vec![session],
+        PoolLayout::default(),
+        Instant::now() + Duration::from_secs(10),
+        std::future::pending(),
+        PoolMetrics::default(),
+    );
+    let status = pool.subscribe_connectivity();
+    let initial = status.borrow().clone();
+    assert!(initial.connected(1));
+    // The fixture's synthetic topology must not be replaced by native IDs on
+    // the production observer's first tick, invalidating product route gates.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(*status.borrow(), initial);
+    pool.close().await.unwrap();
+    assert!(status.borrow().closed);
+    assert!(pool.sessions()[0].is_closed());
+    f.router.close().await.unwrap();
+}
