@@ -1,4 +1,10 @@
-//! Outbound-only clients. A session reuses its transport; operations are never replayed.
+pub mod connectivity;
+pub mod credentials;
+mod managed;
+pub mod transport;
+pub use managed::{CloseReason, ManagedPool, PoolLayout, PoolMetrics, TransportError};
+
+// Outbound-only clients. A session reuses its transport; operations are never replayed.
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

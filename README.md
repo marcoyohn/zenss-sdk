@@ -73,3 +73,15 @@ Development TCP Router peering uses native stamp `_resourcebudget12_plaintext2`.
 ### Candidate platform notification API
 
 The next build kit adds `zenss_plugin_trait::notifications::PlatformNotifications`: bounded, advisory platform hints on the shared Host Session, authenticated by issuer-scoped Router receipts. Products retain authoritative reconciliation. This API is not in published v0.4.0; use a new immutable release before updating downstream pins. See `docs/platform-notifications.md` in the source repository.
+
+## Managed client transport (v0.5.1)
+
+`zenss-client-sdk` now provides `ManagedPool`, `PoolLayout`, typed `TransportOptions`,
+TLS/explicit intranet RSA credentials, local CSR/key generation, connectivity
+notifications and bounded cleanup. Product code owns identity verification,
+role handoff and business acknowledgements. Enable `plaintext` explicitly for
+the authenticated unencrypted profile; no TLS fallback is attempted.
+
+This release adds client APIs only. Existing native Host/Plugin SDK/build-kit
+v0.5.0 combinations stay pinned; no v0.5.1 Host image is implied. Network clients
+continue to use official crates.io Zenoh 1.10.1 and never require private source.

@@ -115,3 +115,12 @@ Drain is unsupported. The receiving lease is shortened by 500ms for the fixed
 250ms clock-anchor tolerance at each Router. Network replication and business
 route-ready proof remain product responsibilities. These operations require the
 candidate matching Host and reviewed topology; they do not enable production.
+
+## Managed outbound transport
+
+- `ManagedPool::open(options, layout, shared_budget, deadline, root_closed, metrics)` opens finite independent sessions, cancelled safely even during partial opening.
+- `subscribe_connectivity`, `subscribe_closed`, `subscribe_deadline` provide coalesced observations without granting product readiness.
+- `update_deadline` accepts a product-verified monotonic deadline and refuses expired/stopped owners.
+- `request_close`/`close` stop and join; failed cleanup retains capacity.
+- `credentials::signing_request` creates a local signing key/CSR; `PossessionKey` supports the explicit `plaintext` feature. Private keys are never sent to the platform.
+- Existing Client, query/discover and announcement APIs remain available.
