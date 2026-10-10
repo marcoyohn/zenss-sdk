@@ -1,19 +1,40 @@
-//! Outbound-only clients. A session reuses its transport; operations are never replayed.
+pub mod backend;
+pub use backend::{
+    ClientMode, ClientTransport, HostSessionSource, HostedTransport, OutboundTransport,
+    SessionTransport,
+};
+pub mod connectivity;
+pub mod credentials;
+mod managed;
+pub mod transport;
+pub use managed::{CloseReason, ManagedPool, PoolLayout, PoolMetrics, TransportError};
+
+// Explicit outbound or hosted clients; operations are never replayed.
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 pub use zenss_contracts::{ServiceIdentity, MAX_MESSAGE_BYTES};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientOptions {
     pub endpoints: Vec<String>,
-    /// Native Zenoh TLS credentials (paths or PEM values as supported by Zenoh).
+    /// Native Zenoh TLS credentials (paths or the matching *_base64 fields).
     #[serde(default)]
     pub tls: Option<Value>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+impl std::fmt::Debug for ClientOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientOptions")
+            .field("endpoints", &self.endpoints)
+            .field("tls", &self.tls.as_ref().map(|_| "[REDACTED]"))
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
 }
 fn default_timeout() -> u64 {
     5000
@@ -67,11 +88,15 @@ impl ClientOptions {
                     "connect_certificate",
                     "connect_private_key",
                 ] {
-                    ensure!(
-                        tls.get(field)
+                    let encoded = format!("{field}_base64");
+                    let present = |name: &str| {
+                        tls.get(name)
                             .and_then(Value::as_str)
-                            .is_some_and(|s| !s.is_empty()),
-                        "missing TLS credential {field}"
+                            .is_some_and(|s| !s.is_empty())
+                    };
+                    ensure!(
+                        present(field) ^ present(&encoded),
+                        "exactly one TLS credential {field} or {encoded} required"
                     );
                 }
             }
@@ -85,9 +110,8 @@ impl ClientOptions {
     }
 }
 
-pub struct Client {
-    session: zenoh::Session,
-    timeout: Duration,
+pub struct Client<T: ClientTransport = OutboundTransport> {
+    transport: T,
 }
 impl Client {
     pub async fn connect(options: ClientOptions) -> Result<Self> {
@@ -97,26 +121,55 @@ impl Client {
             .await
             .context("connection timeout")?
             .map_err(|e| anyhow::anyhow!("connection failed: {e}"))?;
-        Ok(Self { session, timeout })
+        Ok(Self {
+            transport: OutboundTransport { session, timeout },
+        })
     }
-    /// Native session APIs for subscriptions and explicitly addressed product protocols.
-    pub fn session(&self) -> &zenoh::Session {
-        &self.session
-    }
-    pub async fn announce(
-        &self,
-        identity: &ServiceIdentity,
-    ) -> Result<zenoh::liveliness::LivelinessToken> {
-        self.session
-            .liveliness()
-            .declare_token(identity.liveliness_key()?)
-            .await
-            .map_err(|e| anyhow::anyhow!("announce failed: {e}"))
-    }
-    /// Address a single instance. A timeout is an unknown business outcome; no retry occurs.
-    pub async fn query(&self, key: &str, payload: impl Into<Vec<u8>>) -> Result<Vec<u8>> {
+    /// Explicit native attachment. No connect options, probing or network fallback.
+    pub async fn from_host<S, B>(source: S, binding: B) -> Result<Client<S::Transport>>
+    where
+        S: HostSessionSource<B>,
+    {
+        let host = source.open_host_session(binding).await?;
+        ensure!(host.mode() == ClientMode::Hosted, "host adapter required");
         ensure!(
-            !key.contains('*') && key.len() <= 1024,
+            (Duration::from_millis(1)..=Duration::from_secs(300)).contains(&host.timeout()),
+            "invalid host timeout"
+        );
+        host.ensure_open()?;
+        Ok(Client { transport: host })
+    }
+}
+impl<T: SessionTransport> Client<T> {
+    /// This client's Session. Cloning shares it; closing a clone closes this
+    /// client. Raw operations bypass facade scope and capacity enforcement.
+    pub fn session(&self) -> &T::Session {
+        self.transport.session()
+    }
+}
+impl<T: HostedTransport> Client<T> {
+    pub fn revocation(&self) -> T::Revocation {
+        self.transport.revocation()
+    }
+}
+impl<T: ClientTransport> Client<T> {
+    pub fn mode(&self) -> ClientMode {
+        self.transport.mode()
+    }
+    /// Platform binding only; not a signed product authorization.
+    pub fn identity(&self) -> Option<&ServiceIdentity> {
+        self.transport.identity()
+    }
+    pub async fn announce(&self, identity: &ServiceIdentity) -> Result<T::Announcement> {
+        self.transport.ensure_open()?;
+        identity.validate()?;
+        self.transport.announce(identity).await
+    }
+    /// Address a single instance. A timeout is an unknown outcome; no replay occurs.
+    pub async fn query(&self, key: &str, payload: impl Into<Vec<u8>>) -> Result<Vec<u8>> {
+        self.transport.ensure_open()?;
+        ensure!(
+            !key.contains(['*', '?', '#']) && !key.is_empty() && key.len() <= 1024,
             "queries require a bounded exact instance key"
         );
         let payload = payload.into();
@@ -124,28 +177,15 @@ impl Client {
             payload.len() <= MAX_MESSAGE_BYTES,
             "payload exceeds platform limit"
         );
-        let replies = self
-            .session
-            .get(key.to_owned())
-            .payload(payload)
-            .timeout(self.timeout)
-            .await
-            .map_err(|e| anyhow::anyhow!("query failed: {e}"))?;
-        let reply = tokio::time::timeout(self.timeout, replies.recv_async())
-            .await
-            .context("query timeout; outcome unknown")?
-            .map_err(|e| anyhow::anyhow!("query closed without a reply; outcome unknown: {e}"))?;
-        let sample = reply.result().map_err(|e| {
-            anyhow::anyhow!(
-                "remote error: {}",
-                e.payload().try_to_string().unwrap_or_default()
-            )
-        })?;
+        let reply =
+            tokio::time::timeout(self.transport.timeout(), self.transport.query(key, payload))
+                .await
+                .context("query timeout; outcome unknown")??;
         ensure!(
-            sample.payload().len() <= MAX_MESSAGE_BYTES,
+            reply.len() <= MAX_MESSAGE_BYTES,
             "reply exceeds platform limit"
         );
-        Ok(sample.payload().to_bytes().into_owned())
+        Ok(reply)
     }
     pub async fn discover(&self, deployment: &str) -> Result<Vec<ServiceIdentity>> {
         zenss_contracts::validate_segment(deployment)?;
@@ -166,10 +206,7 @@ impl Client {
         Ok(identities)
     }
     pub async fn close(self) -> Result<()> {
-        self.session
-            .close()
-            .await
-            .map_err(|e| anyhow::anyhow!("session close failed: {e}"))
+        self.transport.close().await
     }
 }
 

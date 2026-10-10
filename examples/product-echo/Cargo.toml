@@ -9,12 +9,16 @@ publish = false
 [features]
 default = ["dynamic_plugin"]
 dynamic_plugin = []
+# Native product only; the network Client SDK keeps registry Zenoh unchanged.
+router-origin = ["zenoh/zenss-router-origin"]
 
 [lib]
 name = "zenss_plugin_echo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+zenss-client-sdk.workspace = true
+zenss-client-host.workspace = true
 zenss-plugin-trait.workspace = true
 zenoh.workspace = true
 serde_json.workspace = true

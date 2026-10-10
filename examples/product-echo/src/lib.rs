@@ -1,4 +1,6 @@
 //! A product compiled from public SDK only; receives the existing host Runtime.
+use zenss_client_host::HostBinding;
+use zenss_client_sdk::Client;
 use zenss_plugin_trait::zenss_contracts::{ServiceIdentity, MAX_MESSAGE_BYTES};
 use zenss_plugin_trait::{
     plugin_config, plugin_version, DynamicRuntime, ManagedPlugin, Plugin, PluginSettings,
@@ -60,6 +62,40 @@ impl Plugin for EchoPlugin {
                     .liveliness()
                     .declare_token(identity.liveliness_key()?)
                     .await?;
+                // Exercise the public hosted factory across the actual dynamic
+                // plugin boundary before readiness. This temporary client has
+                // its own Session but does not create another Router or socket.
+                let probe = Client::from_host(
+                    context.clone(),
+                    HostBinding {
+                        identity: ServiceIdentity::new(
+                            &identity.deployment,
+                            "echo-probe",
+                            &identity.instance,
+                        )?,
+                        query_prefixes: vec![],
+                        expires_at: tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(30),
+                        timeout: std::time::Duration::from_secs(2),
+                        max_inflight: 1,
+                    },
+                )
+                .await?;
+                let probe_session = probe.session().clone();
+                let probe_presence = probe.announce(probe.identity().unwrap()).await?;
+                let shared_runtime =
+                    probe_session.zid() == session.zid() && probe_session != session;
+                probe.close().await?;
+                let hosted_session_closed = shared_runtime
+                    && probe_session.is_closed()
+                    && probe_presence.is_closed()
+                    && !session.is_closed();
+                if !hosted_session_closed {
+                    return Err(zenss_plugin_trait::zerror!(
+                        "hosted client ownership check failed"
+                    )
+                    .into());
+                }
                 context.ready()?;
                 loop {
                     tokio::select! {
@@ -70,7 +106,7 @@ impl Plugin for EchoPlugin {
                             let Ok(_admission)=context.admit() else {query.reply_err("echo busy or draining").await?;continue;};
                             let payload=query.payload().map(|p|p.to_bytes().into_owned()).unwrap_or_default();
                             if payload.len()>MAX_MESSAGE_BYTES {query.reply_err("payload too large").await?;continue;}
-                            query.reply(query.key_expr().clone(),serde_json::to_vec(&serde_json::json!({"echo":String::from_utf8_lossy(&payload),"runtime_id":session.zid().to_string()}))?).await?;
+                            query.reply(query.key_expr().clone(),serde_json::to_vec(&serde_json::json!({"echo":String::from_utf8_lossy(&payload),"runtime_id":session.zid().to_string(),"hosted_session_closed":hosted_session_closed}))?).await?;
                         }
                     }
                 }

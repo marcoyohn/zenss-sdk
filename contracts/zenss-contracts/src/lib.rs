@@ -1,6 +1,7 @@
 //! Public platform contracts. No daemon, database or native plugin dependencies.
 
 use serde::{Deserialize, Serialize};
+pub mod route_authorization;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const LIFECYCLE_CONFIG_PATH: &str = "__zenss__/command";

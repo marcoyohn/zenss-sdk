@@ -37,3 +37,4 @@ lazy_static = "1.4"
 zenss-contracts.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
+sha2.workspace = true

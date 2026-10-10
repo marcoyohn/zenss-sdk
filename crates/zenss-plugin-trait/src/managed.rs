@@ -101,6 +101,39 @@ impl PluginContext {
         })
     }
 
+    /// Track finite, optional work through plugin cleanup. Normal completion is
+    /// allowed; failure/panic still revokes readiness. The future must observe
+    /// draining/stopping and release its resources before returning.
+    pub fn spawn_scoped<F>(&self, future: F) -> ZResult<JoinHandle<()>>
+    where
+        F: Future<Output = ZResult<()>> + Send + 'static,
+    {
+        // Serialize registration with phase changes so cleanup cannot acknowledge
+        // completion between an adapter's readiness check and task registration.
+        let snapshot = self.state.snapshot.lock().unwrap();
+        if self.state.drain.is_cancelled()
+            || snapshot.cleanup_complete
+            || matches!(
+                snapshot.phase,
+                PluginPhase::Draining
+                    | PluginPhase::Stopping
+                    | PluginPhase::Stopped
+                    | PluginPhase::Failed
+            )
+        {
+            return Err(zerror!("plugin cannot start scoped work after shutdown").into());
+        }
+        let state = self.state.clone();
+        let tracked = self.state.tasks.track_future(async move {
+            match AssertUnwindSafe(future).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => state.failed(format!("scoped child task failed: {error}")),
+                Err(_) => state.failed("scoped child task panicked".into()),
+            }
+        });
+        Ok(spawn_runtime(tracked))
+    }
+
     /// Supervised children must observe stopping() and finish their own cleanup.
     /// Failure or panic revokes readiness. Cleanup is acknowledged only after all children exit.
     pub fn spawn<F>(&self, future: F)

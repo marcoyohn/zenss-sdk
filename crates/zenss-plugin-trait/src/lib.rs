@@ -6,7 +6,9 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::task::JoinHandle;
+mod authority_owner;
 mod managed;
+pub use authority_owner::ConnectionAuthorityGuard;
 pub use managed::{AdmissionGuard, ManagedPlugin, PluginContext};
 pub use zenss_contracts;
 
@@ -109,6 +111,113 @@ pub fn plugin_config(runtime: &DynamicRuntime, name: &str) -> ZResult<serde_json
     runtime.get_config().get_plugin_config(name)
 }
 
+/// Native-only admission control. The host validates issuer scope, revisions,
+/// exact permissions and the 30-second hard lease. This is never exposed to clients.
+pub fn update_route_authorization(
+    runtime: &DynamicRuntime,
+    command: &zenss_contracts::route_authorization::RouteAuthorizationCommand,
+) -> ZResult<()> {
+    let bytes = serde_json::to_vec(command)?;
+    if bytes.len() > zenss_contracts::route_authorization::MAX_ROUTE_COMMAND_BYTES {
+        return Err(zerror!("route command exceeds native control limit").into());
+    }
+    runtime.route_gate_command(&bytes)
+}
+
+/// Resolve the host's receipt for this received Query. Attachments, ZID, source
+/// info and the payload's own identity fields are never accepted as proof.
+pub fn authenticated_query_principal(
+    runtime: &DynamicRuntime,
+    query: &zenoh::query::Query,
+) -> ZResult<zenss_contracts::route_authorization::RoutePrincipal> {
+    Ok(authenticated_query_context(runtime, query)?.principal)
+}
+
+pub fn authenticated_query_context(
+    runtime: &DynamicRuntime,
+    query: &zenoh::query::Query,
+) -> ZResult<zenss_contracts::route_authorization::AuthenticatedQueryContext> {
+    use sha2::{Digest, Sha256};
+    let payload = query
+        .payload()
+        .ok_or_else(|| zerror!("query lacks authenticated envelope"))?;
+    let digest: [u8; 32] = Sha256::digest(payload.to_bytes()).into();
+    Ok(serde_json::from_slice(&runtime.route_gate_principal(
+        &digest,
+        query.key_expr().as_str(),
+    )?)?)
+}
+
+/// Consume a separate Platform-origin receipt from the optional direct-Router
+/// profile. An SDK receipt cannot decode as Platform provenance, and vice versa.
+/// The host rechecks peer pin, scope, drain and the original finite proof.
+pub fn authenticated_platform_query_context(
+    runtime: &DynamicRuntime,
+    query: &zenoh::query::Query,
+) -> ZResult<zenss_contracts::route_authorization::AuthenticatedPlatformQueryContext> {
+    use sha2::{Digest, Sha256};
+    let payload = query
+        .payload()
+        .ok_or_else(|| zerror!("query lacks authenticated platform payload"))?;
+    let digest: [u8; 32] = Sha256::digest(payload.to_bytes()).into();
+    Ok(serde_json::from_slice(&runtime.route_gate_principal(
+        &digest,
+        query.key_expr().as_str(),
+    )?)?)
+}
+
+/// Atomically replace this trusted issuer's exact native control-capacity policy.
+/// This does not grant routes, validate business effects, or promise total RSS.
+/// A matched Host is required; unsupported older Hosts return an error.
+pub fn set_query_control_policy(
+    runtime: &DynamicRuntime,
+    issuer: &str,
+    rules: &[zenss_contracts::route_authorization::QueryControlRule],
+) -> ZResult<()> {
+    use zenss_contracts::route_authorization::{
+        QueryControlPolicyCommand, MAX_ROUTE_COMMAND_BYTES,
+    };
+    let command = QueryControlPolicyCommand {
+        operation: "install_query_control_policy".into(),
+        issuer: issuer.into(),
+        rules: rules.to_vec(),
+        require_grant_bound_capacity: false,
+    };
+    let bytes = serde_json::to_vec(&command)?;
+    if bytes.len() > MAX_ROUTE_COMMAND_BYTES {
+        return Err(zerror!("capacity command exceeds native limit").into());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ack {
+        installed: bool,
+    }
+    let response = runtime.route_gate_credential(&bytes)?;
+    if response.len() > 512 {
+        return Err(zerror!("invalid capacity policy response").into());
+    }
+    let ack: Ack = serde_json::from_slice(&response)?;
+    if !ack.installed {
+        return Err(zerror!("capacity policy was not installed").into());
+    }
+    Ok(())
+}
+
+/// Sign a CSR after the native product has freshly authenticated its parent key.
+/// The host replaces all CSR names/usages and fixes a client-only lifetime.
+pub fn issue_channel_credential(
+    runtime: &DynamicRuntime,
+    request: &zenss_contracts::route_authorization::ChannelCredentialRequest,
+) -> ZResult<zenss_contracts::route_authorization::ChannelCredential> {
+    let bytes = serde_json::to_vec(request)?;
+    if bytes.len() > zenss_contracts::route_authorization::MAX_ROUTE_COMMAND_BYTES {
+        return Err(zerror!("credential request exceeds native control limit").into());
+    }
+    Ok(serde_json::from_slice(
+        &runtime.route_gate_credential(&bytes)?,
+    )?)
+}
+
 /// Validated host metadata injected into every configured plugin.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginSettings {
@@ -130,3 +239,37 @@ impl PluginSettings {
         Ok(result)
     }
 }
+
+/// Atomically install a route grant and its finite capacity policy.
+/// Existing grant renewal retains its policy; revocation/expiry removes it.
+pub fn install_controlled_route_grant(
+    runtime: &DynamicRuntime,
+    lease: &zenss_contracts::route_authorization::RouteLease,
+    capacity: &zenss_contracts::route_authorization::QueryGrantControlPolicy,
+) -> ZResult<()> {
+    use zenss_contracts::route_authorization::{
+        ControlledRouteGrantCommand, MAX_ROUTE_COMMAND_BYTES,
+    };
+    let command = ControlledRouteGrantCommand {
+        operation: "install_controlled_route_grant".into(),
+        lease: Box::new(lease.clone()),
+        capacity: capacity.clone(),
+    };
+    let bytes = serde_json::to_vec(&command)?;
+    if bytes.len() > MAX_ROUTE_COMMAND_BYTES {
+        return Err(zerror!("controlled grant exceeds native limit").into());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ack {
+        installed: bool,
+    }
+    let response = runtime.route_gate_credential(&bytes)?;
+    if response.len() > 512 || !serde_json::from_slice::<Ack>(&response)?.installed {
+        return Err(zerror!("controlled grant was not installed").into());
+    }
+    Ok(())
+}
+
+/// Bounded advisory notifications for trusted platform peers.
+pub mod notifications;
